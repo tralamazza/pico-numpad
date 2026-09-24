@@ -1,8 +1,37 @@
 # Pico numpad firmware
 
+## Prerequisites
+
+- A **Pico 2 W** with the RGB keypad attached. This firmware targets RP2350 with
+  4 MiB flash, not the original Pico/Pico W.
+- An SWD debug probe supported by `probe-rs` (the tested setup uses a Raspberry Pi
+  Debug Probe). Connect the probe's SWDIO, SWCLK, and GND to the matching Pico
+  debug connections, connect the probe to your computer, and power the Pico.
+  The Pico's own USB connector is used for keyboard/configuration access; the
+  flash command below uses the separate SWD probe.
+- Rust/Cargo managed by `rustup`, with the embedded target and lint components:
+
+  ```sh
+  rustup target add thumbv8m.main-none-eabihf
+  rustup component add rustfmt clippy
+  ```
+
+- `probe-rs` on `PATH` for flashing and RTT, and `just` on `PATH` for the
+  repository's build/check recipes. The tested probe-rs version is 0.32.0.
+- For the optional web configurator: Python 3 to serve the editor locally and
+  a WebUSB-capable browser such as Chrome or Edge.
+
 ## Build and flash
 
-From this directory:
+Run Cargo commands from **`firmware/`**, so Cargo picks up its `.cargo/config.toml`
+with the embedded target and probe runner. Starting at the repository root:
+
+```sh
+cd firmware
+cargo build --release
+```
+
+With the powered Pico and SWD probe connected, flash and verify from `firmware/`:
 
 ```sh
 cargo run --release -- --verify
@@ -16,7 +45,12 @@ the keyboard continues running without the probe. To attach without flashing:
 probe-rs attach --chip RP235x --no-catch-reset target/thumbv8m.main-none-eabihf/release/pico-numpad
 ```
 
-Use the exact ELF that is on the board for RTT decoding.
+Use the exact ELF that is on the board for RTT decoding. Run only one probe-rs
+session at a time; stop an existing RTT reader before starting another flash or
+attach command.
+
+Alternatively, from the repository root, use `just build` or `just flash`; these
+recipes change into `firmware/` for you.
 
 ## USB keyboard and Bluetooth routing
 
@@ -37,6 +71,35 @@ The editor keeps its existing vendor interfaces and bulk endpoints.
 - Switching BLE slots still reboots the board, briefly reconnecting USB too.
 - Storage-recovery mode retains USB configuration, but does not type its recovery
   gestures as keyboard input.
+
+## Configure keys and LEDs over WebUSB
+
+1. Connect the Pico's own USB port to the computer with a data-capable cable.
+   The debug probe's USB connection alone does not expose the configurator.
+2. From the repository root, serve the editor:
+
+   ```sh
+   python3 -m http.server 8080 --bind 127.0.0.1 --directory web
+   ```
+
+3. Open <http://localhost:8080> in Chrome or Edge. Use localhost (or HTTPS when
+   hosting elsewhere), not a `file://` URL; the editor requires a secure context.
+4. Click **Connect** and select **pico-numpad** in the browser's USB picker.
+5. Edit the key mappings, LED mode, or brightness, then click **Save to flash**.
+   Wait for **Saved to flash.** before unplugging or restarting the Pico.
+
+Editing the page alone does not update the device. **Save to flash** first applies
+those settings to RAM, then persists them. A protocol-level apply (`SET_CONFIG`)
+alone is temporary; if the save fails after applying, the running settings may
+have changed without being persisted.
+
+**Reset defaults** immediately resets the running key/LED configuration but does
+not save it. Click **Save to flash** afterward to keep those defaults across a
+restart. **Reload** reads the device's current running configuration, not a
+separate copy from flash. These controls never clear Bluetooth pairings.
+
+The editor is optional: USB keyboard input works without a browser. Closing the
+editor does not disable USB keyboard priority.
 
 ## Three Bluetooth host slots
 
@@ -162,22 +225,14 @@ fails on enabled Clippy all/pedantic lints. Cast lints are not blanket-allowed: 
 narrow deliberately (`config_store.rs` flash offsets, `host_slots.rs` slot ids)
 carry a scoped `#![allow(clippy::cast_possible_truncation)]` with the reason.
 
-The key controls, report builder, debouncer, and recovery gestures are hardware-free
-and are compiled directly by `just test` (equivalently, from `firmware/`):
+`just test` compiles the hardware-free modules directly with `rustc`: host-slot
+controls (`host_slots.rs`), HID reports (`hid.rs`), debounce (`debounce.rs`),
+recovery gestures (`recovery.rs`), and USB/BLE routing (`routing.rs`). Routing
+coverage includes USB priority, held-key handover, and disconnected-input handling.
 
-```sh
-rustc --edition=2021 --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests
-/tmp/pico-numpad-slot-tests
-rustc --edition=2021 --test src/hid.rs -o /tmp/pico-numpad-hid-tests
-/tmp/pico-numpad-hid-tests
-rustc --edition=2021 --test src/debounce.rs -o /tmp/pico-numpad-debounce-tests
-/tmp/pico-numpad-debounce-tests
-rustc --edition=2021 --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests
-/tmp/pico-numpad-recovery-tests
-```
-
-Those four files are linted through `clippy-driver` with the same levels as the
-crate, because a direct `rustc` invocation does not read `Cargo.toml`.
+`just clippy-host` lints these modules through `clippy-driver`, explicitly passing
+the lint levels because standalone compilation does not read `Cargo.toml`.
+Use the recipes in [`../justfile`](../justfile) as the authoritative command list.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain

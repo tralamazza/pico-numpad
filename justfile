@@ -52,13 +52,33 @@ test:
     && rustc --edition=2021 --test src/routing.rs -o /tmp/pico-numpad-routing-tests \
     && /tmp/pico-numpad-routing-tests
 
-# Build the firmware image.
-build:
-    cd firmware && cargo build --release
+# defmt log levels. `release` is the image you ship; `diagnostic` is the bench
+# image. Set here (not only in .cargo/config.toml) so the two profiles stay apart
+# and a bare `cargo` call still defaults to full tracing.
+#
+# Measured flash (text+data) for this app, which has 26 warn!/17 info!/1 error!:
+#   error 708,200   warn 717,364   info 719,904   debug 726,788
+# `info` is the ship level: it keeps the app's state transitions (config loaded,
+# slot active, connected, pairing complete) for 2.5 KiB over `warn`, and still
+# drops the cyw43 HCI rx/tx and embassy debug spam that costs ~7 KiB at `debug`.
+LOG_SHIP := "info"
+LOG_BENCH := "debug"
 
-# Flash over SWD and tail RTT logs (~35s to verify).
+# Build the quiet ship image (release profile, no flashing).
+build:
+    cd firmware && DEFMT_LOG={{LOG_SHIP}} cargo build --release
+
+# Build the bench image with full defmt tracing.
+diag:
+    cd firmware && DEFMT_LOG={{LOG_BENCH}} cargo build --profile diagnostic
+
+# Flash the bench image over SWD and tail RTT logs (~35s to verify).
 flash:
-    cd firmware && cargo run --release -- --verify
+    cd firmware && DEFMT_LOG={{LOG_BENCH}} cargo run --profile diagnostic -- --verify
+
+# Flash the quiet ship image over SWD; info, warn and error still reach RTT.
+ship:
+    cd firmware && DEFMT_LOG={{LOG_SHIP}} cargo run --release -- --verify
 
 # fmt-check + clippy + tests.
 check: fmt-check lint test

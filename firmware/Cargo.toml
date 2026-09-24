@@ -39,6 +39,14 @@ portable-atomic = "1.5"
 [profile.release]
 debug = 2
 
+# Bench build: identical codegen to `release`, but compiled with full defmt
+# tracing. Its own profile so the quiet `release` image and the chatty bench
+# image land in separate target dirs; otherwise flipping DEFMT_LOG recompiles the
+# whole embassy/trouble-host tree every time. Cargo cannot scope env vars to a
+# profile, so the level itself is set by the justfile recipes.
+[profile.diagnostic]
+inherits = "release"
+
 # Align cyw43 + embassy with the bt-hci-transport 0.1 model used by trouble-host 0.8.
 # Matches the trouble repo's rp-pico-2-w example.
 [patch.crates-io]

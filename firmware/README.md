@@ -23,34 +23,60 @@
 
 ## Build and flash
 
+There are two release-grade profiles. They land in separate target directories, so
+switching between them does not recompile the dependency tree.
+
+| Profile | `DEFMT_LOG` | Use for | Artifact |
+| --- | --- | --- | --- |
+| `release` | `info` | the image you ship | `target/thumbv8m.main-none-eabihf/release/pico-numpad` |
+| `diagnostic` | `debug` | bench work with full RTT tracing | `target/thumbv8m.main-none-eabihf/diagnostic/pico-numpad` |
+
+From the repository root, the `just` recipes change into `firmware/` for you:
+
+```sh
+just build   # quiet ship image: release, DEFMT_LOG=info
+just diag    # bench image: diagnostic, DEFMT_LOG=debug
+just flash   # flash the bench image over SWD and tail RTT
+just ship    # flash the quiet ship image over SWD
+```
+
+The ship profile drops the `debug!` flood (cyw43 HCI `rx`/`tx`, embassy internals)
+but keeps `info` and above, so a shipped device still reports config load, active
+slot, BLE connect and pairing on RTT. Measured flash for this app: `error`
+708,200 / `warn` 717,364 / `info` 719,904 / `debug` 726,788 bytes. Adjust
+`LOG_SHIP` in the [`../justfile`](../justfile) if you want a different cut.
+
 Run Cargo commands from **`firmware/`**, so Cargo picks up its `.cargo/config.toml`
-with the embedded target and probe runner. Starting at the repository root:
+with the embedded target and probe runner. Note that a bare Cargo invocation picks
+up `DEFMT_LOG = debug` from that config for **every** profile, so a plain
+`cargo build --release` is debug-logged and is *not* the same artifact as
+`just build`:
 
 ```sh
 cd firmware
-cargo build --release
+cargo build --profile diagnostic   # bench image, full tracing
+DEFMT_LOG=info cargo build --release   # ship image
 ```
 
 With the powered Pico and SWD probe connected, flash and verify from `firmware/`:
 
 ```sh
-cargo run --release -- --verify
+cargo run --profile diagnostic -- --verify
 ```
 
 The Cargo runner flashes the Pico 2 W over SWD using `probe-rs` and reads RTT
 logs. Allow roughly 35 seconds for flashing/verification. Stop it with Ctrl-C;
-the keyboard continues running without the probe. To attach without flashing:
+the keyboard continues running without the probe. To attach without flashing,
+point at the ELF for the profile that is actually on the board:
 
 ```sh
-probe-rs attach --chip RP235x --no-catch-reset target/thumbv8m.main-none-eabihf/release/pico-numpad
+probe-rs attach --chip RP235x --no-catch-reset target/thumbv8m.main-none-eabihf/diagnostic/pico-numpad
 ```
 
-Use the exact ELF that is on the board for RTT decoding. Run only one probe-rs
-session at a time; stop an existing RTT reader before starting another flash or
-attach command.
-
-Alternatively, from the repository root, use `just build` or `just flash`; these
-recipes change into `firmware/` for you.
+Use the exact ELF that is on the board for RTT decoding; defmt indexes its string
+table per build, so the wrong ELF decodes log lines as unrelated strings. Run
+only one probe-rs session at a time; stop an existing RTT reader before starting
+another flash or attach command.
 
 ## USB keyboard and Bluetooth routing
 

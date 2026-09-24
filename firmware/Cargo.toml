@@ -2,11 +2,13 @@
 name = "pico-numpad"
 version = "0.1.0"
 edition = "2021"
-resolver = "2"
 
 [dependencies]
 # Embassy async runtime + RP2350 HAL
-embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+# `executor-interrupt` is deliberately not enabled: nothing spawns at interrupt
+# priority (no `send_priority` anywhere), and the feature pulls in the interrupt-mode
+# executor machinery for nothing. Add it back with the task that needs it.
+embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.10", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa", "binary-info"] }
 embassy-sync = { version = "0.8", features = ["defmt"] }
@@ -28,7 +30,7 @@ defmt = "1.0"
 defmt-rtt = "1.0"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 
-cortex-m = { version = "0.7" }
+cortex-m = "0.7"
 cortex-m-rt = "0.7"
 static_cell = "2"
 # Native atomics on RP2350. No `critical-section` feature here: embassy-rp already
@@ -49,6 +51,12 @@ inherits = "release"
 
 # Align cyw43 + embassy with the bt-hci-transport 0.1 model used by trouble-host 0.8.
 # Matches the trouble repo's rp-pico-2-w example.
+#
+# Bump every rev below in one commit. Cargo has no variables here, and a mixed-rev
+# set will not resolve. The `version` fields in [dependencies] are constraints only
+# for these crates -- the rev is authoritative -- so a rev whose crates declare a
+# higher version than the pinned constraint fails resolution with a confusing error
+# that points at [dependencies], not at this section.
 [patch.crates-io]
 cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
@@ -63,6 +71,12 @@ embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "3c
 # Lint gate: `cargo clippy` must stay clean. Cast lints are deliberately not
 # allowed here; scope any exception to the module that needs it (config_store.rs,
 # host_slots.rs).
+#
+# `forbid` rather than `deny` is deliberate: this firmware should never need unsafe,
+# and a crate-wide forbid means any future unsafe forces a visible, reviewable edit
+# to this file instead of a local `#[allow(unsafe_code)]`. If unsafe ever becomes
+# genuinely required, change this to "deny" here first. The justfile mirrors this
+# with `-F unsafe_code` for the standalone host-module lint.
 [lints.rust]
 unsafe_code = "forbid"
 

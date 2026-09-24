@@ -9,12 +9,13 @@
   debug connections, connect the probe to your computer, and power the Pico.
   The Pico's own USB connector is used for keyboard/configuration access; the
   flash command below uses the separate SWD probe.
-- Rust/Cargo managed by `rustup`, with the embedded target and lint components:
-
-  ```sh
-  rustup target add thumbv8m.main-none-eabihf
-  rustup component add rustfmt clippy
-  ```
+- Rust/Cargo managed by `rustup`. The toolchain is pinned in
+  [`../rust-toolchain.toml`](../rust-toolchain.toml) (currently 1.98.1) and rustup
+  installs the pinned compiler, the `thumbv8m.main-none-eabihf` target, and the
+  `rustfmt`/`clippy` components automatically on the first build, so there is
+  nothing to add by hand. The pin is load-bearing: the firmware builds against a
+  git rev of embassy, and it also holds back a `proc-macro-error2` future
+  incompatibility that has no upstream fix yet. Bump it deliberately.
 
 - `probe-rs` on `PATH` for flashing and RTT, and `just` on `PATH` for the
   repository's build/check recipes. The tested probe-rs version is 0.32.0.

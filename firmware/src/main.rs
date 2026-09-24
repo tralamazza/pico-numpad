@@ -28,6 +28,7 @@ mod hid;
 mod host_slots;
 mod keypad;
 mod recovery;
+mod routing;
 mod usb;
 
 bind_interrupts!(struct Irqs {

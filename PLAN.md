@@ -64,3 +64,22 @@ Baseline: `893b405` (host slots and Clippy gate). Keep all work Clippy-clean.
   confirm USB/menu responsiveness, retry, explicit reset, and failure handling.
 - [ ] Interrupt a recovery reset between flash operations and verify that legacy
   bonds never reappear and key/LED configuration remains intact.
+
+
+## USB keyboard follow-up
+
+- [x] Add report-protocol USB HID alongside the existing WebUSB interfaces.
+- [x] Share debounced input, mapping, and menu filtering between transports.
+- [x] Use configured, non-suspended USB over BLE; never duplicate typing.
+  USB priority confirmed by the user, including USB A / BLE B connections.
+  The device cannot identify whether both transports terminate on the same host.
+- [x] Release the old transport on handover and require held keys to be released
+  before they type on the new transport. Discard stale USB reset/resume reports.
+- [x] Add report framing/routing tests and include routing in host Clippy gates.
+- [x] `just check`, `just build`, and `git diff --check` pass; composite USB
+  firmware flashed with `--verify` (36.57 seconds).
+- [x] macOS `hidutil` lists USB keyboard (usage page 1, usage 6) alongside BLE.
+  Read-only GET_CONFIG succeeds on unchanged vendor interface 1 / EP1.
+  Existing slot-1 bond reconnects with encryption; no pairing data erased.
+- [ ] Physically verify USB typing, no duplicate input with BLE connected, and
+  BLE fallback after USB unplug; preserve all bonds during validation.

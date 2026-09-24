@@ -30,7 +30,8 @@ clippy-host:
     && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/host_slots.rs -o /tmp/pico-numpad-slot-clippy \
     && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/hid.rs -o /tmp/pico-numpad-hid-clippy \
     && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/debounce.rs -o /tmp/pico-numpad-debounce-clippy \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy
+    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy \
+    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy
 
 # All clippy checks.
 lint: clippy clippy-host
@@ -45,7 +46,9 @@ test:
     && rustc --edition=2021 --test src/debounce.rs -o /tmp/pico-numpad-debounce-tests \
     && /tmp/pico-numpad-debounce-tests \
     && rustc --edition=2021 --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests \
-    && /tmp/pico-numpad-recovery-tests
+    && /tmp/pico-numpad-recovery-tests \
+    && rustc --edition=2021 --test src/routing.rs -o /tmp/pico-numpad-routing-tests \
+    && /tmp/pico-numpad-routing-tests
 
 # Build the firmware image.
 build:

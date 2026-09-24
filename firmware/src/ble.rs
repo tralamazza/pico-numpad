@@ -140,6 +140,7 @@ pub async fn run<C: Controller>(
         keypad,
         backlight,
         controls: Controls::new(),
+        router: crate::routing::Router::default(),
         last_leds: None,
         last_brightness: 0,
     };
@@ -361,6 +362,7 @@ struct KeypadUi {
     keypad: Keypad<'static>,
     backlight: Backlight<'static>,
     controls: Controls,
+    router: crate::routing::Router,
     last_leds: Option<[[u8; 3]; NUM_LEDS]>,
     last_brightness: u8,
 }
@@ -380,7 +382,12 @@ impl KeypadUi {
     async fn poll(&mut self, hosts: &HostSlots, connected: bool) -> Option<Input> {
         let pressed = self.keypad.read_pressed().await.ok()?;
         let now = Instant::now().as_millis();
-        let input = self.controls.update(now, pressed);
+        let mut input = self.controls.update(now, pressed);
+        let usb_active = crate::usb::keyboard_active();
+        let (usb_keys, ble_keys) = self.router.update(input.keys, usb_active, connected);
+        crate::usb::publish_report(build_report(usb_keys, &CONFIG.lock().await.keymap)).await;
+        input.keys = ble_keys;
+        let connected = connected || usb_active;
         let (mode, mut brightness) = {
             let cfg = CONFIG.lock().await;
             (cfg.led_mode, cfg.brightness)

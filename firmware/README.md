@@ -18,6 +18,26 @@ probe-rs attach --chip RP235x --no-catch-reset target/thumbv8m.main-none-eabihf/
 
 Use the exact ELF that is on the board for RTT decoding.
 
+## USB keyboard and Bluetooth routing
+
+The USB data connection exposes a standard report-protocol HID keyboard alongside
+WebUSB configuration. No keyboard driver or browser connection is required.
+The editor keeps its existing vendor interfaces and bulk endpoints.
+
+- **USB takes priority** while a computer has configured the USB device and the
+  USB bus is not suspended. BLE may remain connected, but receives released-key
+  reports rather than duplicate typing.
+- Without an active USB connection (including a power-only cable/charger), input
+  goes to the selected BLE host. USB suspend also permits BLE input; USB remote
+  wake is not implemented.
+- The Pico cannot determine whether USB and BLE lead to the same laptop. Thus a
+  USB connection to laptop A takes priority over a BLE connection to laptop B.
+- Held keys must be released before they can type on a newly selected transport.
+  Keymaps, debounce, the short `+` tap, and host-menu controls are shared.
+- Switching BLE slots still reboots the board, briefly reconnecting USB too.
+- Storage-recovery mode retains USB configuration, but does not type its recovery
+  gestures as keyboard input.
+
 ## Three Bluetooth host slots
 
 Each slot remembers one laptop. Only the selected slot can connect, and only

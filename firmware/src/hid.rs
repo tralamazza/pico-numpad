@@ -37,6 +37,15 @@ pub const REPORT_MAP: &[u8] = &[
 /// Length of the GATT Report characteristic value (without a Report ID prefix).
 pub const REPORT_LEN: usize = 8;
 
+/// USB carries the report ID in-band, unlike the GATT characteristic.
+#[must_use]
+pub fn usb_report(report: [u8; REPORT_LEN]) -> [u8; REPORT_LEN + 1] {
+    let mut packet = [0; REPORT_LEN + 1];
+    packet[0] = 1;
+    packet[1..].copy_from_slice(&report);
+    packet
+}
+
 /// Build a GATT Report characteristic value from a 16-bit pressed mask and a
 /// per-key HID usage map (index = physical key bit).
 ///
@@ -63,6 +72,15 @@ pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_report_prefix_preserves_modifiers_and_release() {
+        assert_eq!(
+            usb_report([2, 0, 0x59, 0, 0, 0, 0, 0]),
+            [1, 2, 0, 0x59, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(usb_report([0; REPORT_LEN]), [1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
 
     #[test]
     fn gatt_report_has_no_id_prefix_and_release_clears_all_bytes() {

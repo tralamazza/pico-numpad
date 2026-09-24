@@ -1,4 +1,4 @@
-//! `WebUSB` configuration interface.
+//! Composite USB keyboard and `WebUSB` configuration interface.
 //!
 //! Presents a vendor-specific bulk interface reachable from a browser via `WebUSB`
 //! (and from libusb/pyusb). A tiny binary protocol reads/writes the shared
@@ -14,8 +14,16 @@
 //! All responses are padded to 33 bytes so the host can always read a fixed size.
 //! ```
 
+use crate::hid::{usb_report, REPORT_LEN, REPORT_MAP};
 use defmt::{info, warn};
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_time::{with_timeout, Duration, Timer};
+use embassy_usb::class::hid::{
+    Config as HidConfig, HidBootProtocol, HidSubclass, HidWriter, State as HidState,
+};
+use portable_atomic::{AtomicBool, AtomicU32, Ordering};
+
 use embassy_usb::class::web_usb::{Config as WebUsbConfig, State, Url, WebUsb};
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
 use embassy_usb::msos::{self, windows_version};
@@ -25,6 +33,69 @@ use static_cell::StaticCell;
 
 use crate::config::{Config, CONFIG, CONFIG_LEN};
 
+static CONFIGURED: AtomicBool = AtomicBool::new(false);
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+static KEY_REPORT: Mutex<CriticalSectionRawMutex, (u32, [u8; REPORT_LEN])> =
+    Mutex::new((0, [0; REPORT_LEN]));
+
+pub async fn publish_report(report: [u8; REPORT_LEN]) {
+    *KEY_REPORT.lock().await = (GENERATION.load(Ordering::Relaxed), report);
+}
+
+pub fn keyboard_active() -> bool {
+    CONFIGURED.load(Ordering::Relaxed) && !SUSPENDED.load(Ordering::Relaxed)
+}
+
+struct UsbEvents;
+impl embassy_usb::Handler for UsbEvents {
+    fn configured(&mut self, configured: bool) {
+        CONFIGURED.store(configured, Ordering::Relaxed);
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    fn reset(&mut self) {
+        self.configured(false);
+        SUSPENDED.store(false, Ordering::Relaxed);
+    }
+    fn enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.reset();
+        }
+    }
+    fn suspended(&mut self, suspended: bool) {
+        SUSPENDED.store(suspended, Ordering::Relaxed);
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>) {
+    let mut last = None;
+    let mut generation = GENERATION.load(Ordering::Relaxed);
+    loop {
+        let current = GENERATION.load(Ordering::Relaxed);
+        if generation != current || !keyboard_active() {
+            last = None;
+            generation = current;
+        }
+        if keyboard_active() {
+            let (report_generation, value) = *KEY_REPORT.lock().await;
+            // Never replay a report from before reset, unconfigure, or suspend.
+            let report = if report_generation == current {
+                value
+            } else {
+                [0; REPORT_LEN]
+            };
+            if last != Some(report) {
+                if let Ok(Ok(())) =
+                    with_timeout(Duration::from_millis(20), writer.write(&usb_report(report))).await
+                {
+                    last = Some(report);
+                }
+            }
+        }
+        Timer::after_millis(5).await;
+    }
+}
 const VID: u16 = 0x2E8A;
 const PID: u16 = 0x000A;
 const MAX_PACKET: u16 = 64;
@@ -53,8 +124,10 @@ struct Endpoints<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
 }
 
-/// Build the `WebUSB` device and run the protocol loop forever.
+/// Run the composite USB device, configuration protocol, and keyboard writer.
 pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
+    static HID_STATE: StaticCell<HidState<'static>> = StaticCell::new();
+    static EVENTS: StaticCell<UsbEvents> = StaticCell::new();
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static MSOS_DESC: StaticCell<[u8; 512]> = StaticCell::new();
@@ -75,7 +148,7 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
 
     let mut config = UsbConfig::new(VID, PID);
     config.manufacturer = Some("pico-numpad");
-    config.product = Some("pico-numpad config");
+    config.product = Some("pico-numpad");
     config.serial_number = Some("0001");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
@@ -116,10 +189,24 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     // are released by NLL at their last use.
     drop(func);
 
+    // Append HID after both vendor interfaces: WebUSB keeps interface 1 and EP1.
+    builder.handler(EVENTS.init(UsbEvents));
+    let keyboard = HidWriter::<_, 9>::new(
+        &mut builder,
+        HID_STATE.init(HidState::new()),
+        HidConfig {
+            report_descriptor: REPORT_MAP,
+            request_handler: None,
+            poll_ms: 5,
+            max_packet_size: 16,
+            hid_subclass: HidSubclass::No,
+            hid_boot_protocol: HidBootProtocol::None,
+        },
+    );
     let mut usb = builder.build();
     let mut ep: Endpoints<'static, D> = Endpoints { write_ep, read_ep };
 
-    join(usb.run(), protocol_loop(&mut ep)).await;
+    join3(usb.run(), protocol_loop(&mut ep), keyboard_loop(keyboard)).await;
     loop {
         embassy_time::Timer::after_millis(1000).await;
     }

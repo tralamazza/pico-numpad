@@ -1,6 +1,7 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 # Flash over SWD with probe-rs (user choice).
-runner = "probe-rs run --chip RP235x"
+# Slot changes intentionally reboot; do not halt the CPU on those resets.
+runner = "probe-rs run --chip RP235x --no-catch-reset"
 # Alternative: picotool load -u -v -x -t elf
 
 [build]

@@ -10,13 +10,15 @@
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn};
-use embassy_futures::select::{select, Either};
-use embassy_time::Timer;
+use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_time::{with_timeout, Duration, Instant, Ticker, Timer};
 use trouble_host::prelude::*;
 
 use crate::backlight::{Backlight, NUM_LEDS};
 use crate::config::{led_mode, CONFIG};
+use crate::config_store::{self, HostSlots};
 use crate::hid::{build_report, REPORT_LEN, REPORT_MAP};
+use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::Keypad;
 
 /// GATT attribute server: HID + Device Information services.
@@ -69,40 +71,45 @@ struct DisService {
 /// Service UUID advertised so hosts can discover the HID service.
 const HID_SERVICE_UUID: &[[u8; 2]] = &[[0x12, 0x18]];
 
-/// Bring up the BLE stack and run the keyboard peripheral forever.
+/// Bring up only the selected slot's identity and bond. Switching slots reboots
+/// the radio cleanly rather than retaining another host's security/CCCD state.
 pub async fn run<C: Controller>(
     controller: C,
     keypad: Keypad<'static>,
     backlight: Backlight<'static>,
-    stored_bond: Option<BondInformation>,
+    mut hosts: HostSlots,
 ) {
-    let address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
-    let mut resources: HostResources<DefaultPacketPool, 1, 2> = HostResources::new();
+    let slot = hosts.active;
+    let mut resources: HostResources<DefaultPacketPool, 1, 2, 1, 1> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
-        .set_random_address(address)
+        .set_random_address(Address::random(host_slots::address(slot)))
         .build();
-
-    if let Some(bond) = stored_bond {
-        if let Err(e) = stack.add_bond_information(bond) {
-            warn!("stored bond rejected: {:?}", e);
-        }
+    if let Some(bond) = &hosts.bonds[slot as usize] {
+        stack
+            .add_bond_information(bond.clone())
+            .expect("active host bond");
     }
-
-    let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-        name: "pico-numpad",
+    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name: host_slots::name(slot),
         appearance: &appearance::human_interface_device::KEYBOARD,
-    })) {
-        Ok(s) => s,
-        Err(e) => panic!("gatt server init failed: {e}"),
+    }))
+    .expect("gatt server init");
+    let mut ui = KeypadUi {
+        keypad,
+        backlight,
+        controls: Controls::new(),
+        last_leds: None,
+        last_brightness: 0,
     };
-
+    info!(
+        "BLE host slot {}: bonded={}",
+        slot + 1,
+        hosts.bonds[slot as usize].is_some()
+    );
     let mut runner = stack.runner();
-    let peripheral = stack.peripheral();
-
-    // Run the BLE host packet processor concurrently with the app loop.
     select(
         runner.run(),
-        app_loop(peripheral, &server, keypad, backlight),
+        app_loop(stack.peripheral(), &server, &mut hosts, &mut ui),
     )
     .await;
 }
@@ -110,32 +117,20 @@ pub async fn run<C: Controller>(
 async fn app_loop<C: Controller>(
     mut peripheral: Peripheral<'_, C, DefaultPacketPool>,
     server: &Server<'_>,
-    mut keypad: Keypad<'static>,
-    mut backlight: Backlight<'static>,
+    hosts: &mut HostSlots,
+    ui: &mut KeypadUi,
 ) {
     let mut adv_data = [0u8; 31];
+    let n = AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteServiceUuids16(&HID_SERVICE_UUID),
+            AdStructure::CompleteLocalName(host_slots::name(hosts.active).as_bytes()),
+        ],
+        &mut adv_data,
+    )
+    .expect("advertising data");
     loop {
-        let (mode, brightness) = {
-            let cfg = CONFIG.lock().await;
-            (cfg.led_mode, cfg.brightness)
-        };
-        set_advertising_pattern(&mut backlight, mode, brightness).await;
-
-        let n = match AdStructure::encode_slice(
-            &[
-                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                AdStructure::CompleteServiceUuids16(&HID_SERVICE_UUID),
-                AdStructure::CompleteLocalName(b"pico-numpad"),
-            ],
-            &mut adv_data,
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                warn!("adv encode failed: {:?}", e);
-                continue;
-            }
-        };
-
         let advertiser = match peripheral
             .advertise(
                 &AdvertisementParameters::default(),
@@ -149,16 +144,38 @@ async fn app_loop<C: Controller>(
             Ok(a) => a,
             Err(e) => {
                 warn!("advertise failed: {:?}", e);
-                Timer::after_millis(500).await;
+                // Keep the physical recovery menu usable even if advertising fails.
+                if let Either::First(action) =
+                    select(ui.wait_action(hosts), Timer::after_millis(500)).await
+                {
+                    apply_action(hosts, action, ui).await;
+                }
                 continue;
             }
         };
-
-        info!("advertising");
-        match select(advertiser.accept(), Timer::after_millis(500)).await {
-            Either::First(Ok(conn)) => {
-                if let Err(e) = conn.set_bondable(true) {
+        // Periodic idle windows let Trouble update the controller resolving list.
+        // Controls use absolute timestamps and survive these cancelled scans.
+        match select3(
+            advertiser.accept(),
+            ui.wait_action(hosts),
+            Timer::after_secs(1),
+        )
+        .await
+        {
+            Either3::First(Ok(conn)) => {
+                if let Some(bond) = &hosts.bonds[hosts.active as usize] {
+                    if !bond.identity.match_identity(&conn.peer_identity()) {
+                        warn!("rejecting peer outside active host slot");
+                        conn.disconnect();
+                        Timer::after_millis(100).await;
+                        continue;
+                    }
+                }
+                let empty = hosts.bonds[hosts.active as usize].is_none();
+                if let Err(e) = conn.set_bondable(empty) {
                     warn!("set bondable failed: {:?}", e);
+                    conn.disconnect();
+                    continue;
                 }
                 let gatt = match conn.with_attribute_server(server) {
                     Ok(g) => g,
@@ -170,49 +187,85 @@ async fn app_loop<C: Controller>(
                 if let Err(e) = gatt.raw().request_security() {
                     warn!("security request failed: {:?}", e);
                 }
-                info!("connected");
-                connection_task(&gatt, &server.hid.report, &mut keypad, &mut backlight).await;
-                info!("disconnected, re-advertising");
+                info!("connected on host slot {}", hosts.active + 1);
+                let action = connection_task(&gatt, &server.hid.report, hosts, ui).await;
+                gatt.raw().disconnect();
+                drop(gatt);
+                if let Some(action) = action {
+                    apply_action(hosts, action, ui).await;
+                }
+                info!("disconnected, re-advertising slot {}", hosts.active + 1);
             }
-            Either::First(Err(e)) => {
-                warn!("accept failed: {:?}", e);
-            }
-            Either::Second(()) => {}
+            Either3::First(Err(e)) => warn!("accept failed: {:?}", e),
+            Either3::Second(action) => apply_action(hosts, action, ui).await,
+            Either3::Third(()) => {}
         }
     }
 }
 
-/// Process GATT events and push HID reports until the peer disconnects.
+/// Save before rebooting; never switch or clear a bond if persistence fails.
+async fn apply_action(hosts: &HostSlots, action: Action, ui: &mut KeypadUi) {
+    let mut next = hosts.clone();
+    next.apply(action);
+    if next == *hosts {
+        return;
+    }
+    if !config_store::save_hosts(&next).await {
+        warn!("host action failed; keeping existing slots");
+        ui.backlight.set_brightness(8);
+        let _ = ui.backlight.write(&[[100, 0, 0]; NUM_LEDS]).await;
+        Timer::after_millis(500).await;
+        ui.last_leds = None;
+        return;
+    }
+    info!(
+        "restarting into host slot {}; pairing={}",
+        next.active + 1,
+        next.bonds[next.active as usize].is_none()
+    );
+    // Let the old BLE link terminate before restarting the controller.
+    Timer::after_millis(150).await;
+    // RP2350 ROM normal reboot via watchdog, not BOOTSEL or a flash erase.
+    embassy_rp::rom_data::reboot(0, 10, 0, 0);
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
+
 async fn connection_task(
     gatt: &GattConnection<'_, '_, DefaultPacketPool>,
     report: &Characteristic<[u8; REPORT_LEN]>,
-    keypad: &mut Keypad<'static>,
-    backlight: &mut Backlight<'static>,
-) {
-    let mut painted_pressed: u16 = 0xFFFF;
-    let mut painted_mode = 0xFF;
-    let mut painted_brightness = 0xFF;
+    hosts: &mut HostSlots,
+    ui: &mut KeypadUi,
+) -> Option<Action> {
+    let mut last_report = None;
+    let mut ticker = Ticker::every(Duration::from_millis(5));
     loop {
-        match select(gatt.next(), Timer::after_millis(5)).await {
+        match select(gatt.next(), ticker.next()).await {
             Either::First(event) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("disconnect: {:?}", reason);
-                    return;
+                    return None;
                 }
                 GattConnectionEvent::PairingComplete {
                     security_level,
                     bond,
                 } => {
                     info!("pairing complete: {:?}", security_level);
-                    if let Some(bond) = bond {
-                        if !crate::config_store::save_bond(&bond).await {
-                            warn!("could not persist bond");
+                    if let Some(bond) = bond.filter(|b| b.is_bonded) {
+                        let mut next = hosts.clone();
+                        next.bonds[hosts.active as usize] = Some(bond);
+                        if next != *hosts {
+                            if !config_store::save_hosts(&next).await {
+                                warn!("could not persist host bond");
+                                return None;
+                            }
+                            *hosts = next;
                         }
+                        let _ = gatt.raw().set_bondable(false);
                     }
                 }
-                GattConnectionEvent::PairingFailed(err) => {
-                    warn!("pairing failed: {:?}", err);
-                }
+                GattConnectionEvent::PairingFailed(err) => warn!("pairing failed: {:?}", err),
                 GattConnectionEvent::Gatt { event } => {
                     if let Ok(reply) = event.accept() {
                         reply.send().await;
@@ -221,62 +274,112 @@ async fn connection_task(
                 _ => {}
             },
             Either::Second(()) => {
-                let pressed = match keypad.read_pressed().await {
-                    Ok(p) => p,
-                    Err(_) => continue,
+                let Some(input) = ui.poll(hosts, true).await else {
+                    continue;
                 };
-                let (keymap, mode, brightness) = {
-                    let cfg = CONFIG.lock().await;
-                    (cfg.keymap, cfg.led_mode, cfg.brightness)
-                };
-
-                let mut need_paint = false;
-                if pressed != painted_pressed {
-                    let value = build_report(pressed, &keymap);
-                    debug!(
-                        "keys={=u16:04x} subscribed={} report={=[u8]:02x}",
-                        pressed,
-                        report.should_notify(gatt),
-                        value
-                    );
-                    if let Err(e) = report.notify(gatt, &value, true).await {
-                        warn!("notify failed: {:?}", e);
-                    }
-                    painted_pressed = pressed;
-                    need_paint = true;
+                if let Some(action) = input.action {
+                    // A released report prevents modifiers/keys sticking on the old host.
+                    let _ = with_timeout(
+                        Duration::from_millis(100),
+                        report.notify(gatt, &[0; REPORT_LEN], true),
+                    )
+                    .await;
+                    return Some(action);
                 }
-                if need_paint || mode != painted_mode || brightness != painted_brightness {
-                    backlight.set_brightness(brightness);
-                    paint(backlight, pressed, mode).await;
-                    painted_mode = mode;
-                    painted_brightness = brightness;
+                let value = build_report(input.keys, &CONFIG.lock().await.keymap);
+                if !report.should_notify(gatt) {
+                    // Send the current state as soon as the host subscribes, even
+                    // if the physical keys have not changed since connection.
+                    last_report = None;
+                } else if last_report != Some(value) {
+                    match with_timeout(
+                        Duration::from_millis(100),
+                        report.notify(gatt, &value, true),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            debug!("keys={=u16:04x} report={=[u8]:02x}", input.keys, value);
+                            last_report = Some(value);
+                        }
+                        Ok(Err(e)) => warn!("notify failed: {:?}", e),
+                        Err(_) => warn!("notify timed out"),
+                    }
                 }
             }
         }
     }
 }
 
-async fn paint(backlight: &mut Backlight<'static>, pressed: u16, mode: u8) {
-    let mut leds = [[0u8; 3]; NUM_LEDS];
-    if mode != led_mode::OFF {
-        for i in 0..NUM_LEDS {
-            leds[i] = if pressed & (1 << i) != 0 {
-                [0, 255, 0]
-            } else {
-                [4, 4, 4]
-            };
-        }
-    }
-    let _ = backlight.write(&leds).await;
+struct KeypadUi {
+    keypad: Keypad<'static>,
+    backlight: Backlight<'static>,
+    controls: Controls,
+    last_leds: Option<[[u8; 3]; NUM_LEDS]>,
+    last_brightness: u8,
 }
 
-async fn set_advertising_pattern(backlight: &mut Backlight<'static>, mode: u8, brightness: u8) {
-    backlight.set_brightness(brightness);
-    let mut leds = [[0u8; 3]; NUM_LEDS];
-    if mode != led_mode::OFF {
-        for i in 0..NUM_LEDS {
-            leds[i] = [0, 0, 40]; // dim blue while advertising
+impl KeypadUi {
+    async fn wait_action(&mut self, hosts: &HostSlots) -> Action {
+        loop {
+            if let Some(input) = self.poll(hosts, false).await {
+                if let Some(action) = input.action {
+                    return action;
+                }
+            }
+            Timer::after_millis(5).await;
         }
     }
-    let _ = backlight.write(&leds).await;
+
+    async fn poll(&mut self, hosts: &HostSlots, connected: bool) -> Option<Input> {
+        let pressed = self.keypad.read_pressed().await.ok()?;
+        let now = Instant::now().as_millis();
+        let input = self.controls.update(now, pressed);
+        let (mode, mut brightness) = {
+            let cfg = CONFIG.lock().await;
+            (cfg.led_mode, cfg.brightness)
+        };
+        let mut leds = [[0; 3]; NUM_LEDS];
+        if input.menu != Menu::Closed {
+            // Management feedback is visible even when normal backlight is off.
+            brightness = brightness.max(8);
+            let colors = host_slots::menu_colors(
+                core::array::from_fn(|i| hosts.bonds[i].is_some()),
+                hosts.active,
+                input.menu,
+                now,
+            );
+            for (i, key) in SLOT_KEYS.iter().enumerate() {
+                leds[key.trailing_zeros() as usize] = colors[i];
+            }
+        } else if mode != led_mode::OFF {
+            for (i, led) in leds.iter_mut().enumerate() {
+                *led = if connected {
+                    if pressed & (1 << i) != 0 {
+                        [0, 255, 0]
+                    } else {
+                        [4, 4, 4]
+                    }
+                } else {
+                    [0, 0, 40]
+                };
+            }
+            if !connected {
+                leds[SLOT_KEYS[hosts.active as usize].trailing_zeros() as usize] =
+                    if hosts.bonds[hosts.active as usize].is_some() {
+                        [0, 80, 0]
+                    } else {
+                        [0, 0, 150]
+                    };
+            }
+        }
+        if self.last_leds != Some(leds) || self.last_brightness != brightness {
+            self.backlight.set_brightness(brightness);
+            if self.backlight.write(&leds).await.is_ok() {
+                self.last_leds = Some(leds);
+                self.last_brightness = brightness;
+            }
+        }
+        Some(input)
+    }
 }

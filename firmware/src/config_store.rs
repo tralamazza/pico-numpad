@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use trouble_host::prelude::BondInformation;
 
 use crate::config::{Config, CONFIG, CONFIG_LEN};
+use crate::host_slots::Slots;
 
 /// Total QSPI flash on the Pico 2 W.
 pub const FLASH_SIZE: usize = 4 * 1024 * 1024;
@@ -28,6 +29,14 @@ pub const CONFIG_OFFSET: u32 = (FLASH_SIZE - 64 * 1024) as u32;
 pub const BOND_OFFSET: u32 = CONFIG_OFFSET + ERASE_SIZE as u32;
 /// Size of the BLE bond storage range.
 pub const BOND_LEN: u32 = 8 * 1024;
+// A separate journal makes migration non-destructive and prevents a cleared
+// slot from resurrecting the legacy bond after a restart.
+const HOSTS_OFFSET: u32 = BOND_OFFSET + BOND_LEN;
+const HOSTS_LEN: u32 = 8 * 1024;
+
+pub type HostSlots = Slots<BondInformation>;
+
+impl<'a> PostcardValue<'a> for HostSlots {}
 
 pub type ConfigFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
 
@@ -102,48 +111,80 @@ fn bond_range() -> Range<u32> {
 }
 
 /// Load the persisted BLE bond, if any.
-pub async fn load_bond() -> Option<BondInformation> {
-    let store = STORE.try_get()?;
+async fn load_bond() -> Result<Option<BondInformation>, &'static str> {
+    let store = STORE.try_get().ok_or("config store not initialised")?;
     let mut flash = store.flash.lock().await;
     let Some(config) = MapConfig::try_new(bond_range()) else {
         warn!("bond range invalid");
-        return None;
+        return Err("bond range invalid");
     };
     let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
     let mut buf = [0u8; 256];
     match map.fetch_item(&mut buf, &()).await {
         Ok(Some(StoredBond(bond))) => {
             info!("bond loaded from flash");
-            Some(bond)
+            Ok(Some(bond))
         }
-        Ok(None) => None,
+        Ok(None) => Ok(None),
         Err(e) => {
             warn!("bond load failed: {:?}", defmt::Debug2Format(&e));
-            None
+            Err("legacy bond read failed")
         }
     }
 }
 
-/// Persist a BLE bond to flash.
-pub async fn save_bond(bond: &BondInformation) -> bool {
+/// Load the host-slot journal or migrate the original bond into slot 1 once.
+pub async fn load_hosts() -> Result<HostSlots, &'static str> {
+    let store = STORE.try_get().ok_or("config store not initialised")?;
+    let existing = {
+        let mut flash = store.flash.lock().await;
+        let config = MapConfig::try_new(HOSTS_OFFSET..HOSTS_OFFSET + HOSTS_LEN)
+            .ok_or("host slot range invalid")?;
+        let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
+        let mut buf = [0u8; 1024];
+        map.fetch_item::<HostSlots>(&mut buf, &())
+            .await
+            .map_err(|_| "host slot read failed")?
+    };
+    if let Some(hosts) = existing {
+        if !hosts.valid() {
+            return Err("invalid host slot data");
+        }
+        info!("host slots loaded; active={}", hosts.active + 1);
+        return Ok(hosts);
+    }
+    let hosts = HostSlots::from_legacy(load_bond().await?);
+    if !save_hosts(&hosts).await {
+        return Err("host slot migration failed");
+    }
+    info!("host slots initialised; legacy bond migrated to slot 1");
+    Ok(hosts)
+}
+
+/// Atomically journal all slots and the active selection as one record.
+/// Callers update their RAM state only after this succeeds.
+pub async fn save_hosts(hosts: &HostSlots) -> bool {
+    if !hosts.valid() {
+        return false;
+    }
     let Some(store) = STORE.try_get() else {
         warn!("config store not initialised");
         return false;
     };
     let mut flash = store.flash.lock().await;
-    let Some(config) = MapConfig::try_new(bond_range()) else {
-        warn!("bond range invalid");
+    let Some(config) = MapConfig::try_new(HOSTS_OFFSET..HOSTS_OFFSET + HOSTS_LEN) else {
+        warn!("host slot range invalid");
         return false;
     };
     let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
-    let mut buf = [0u8; 256];
-    match map.store_item(&mut buf, &(), &StoredBond(bond.clone())).await {
+    let mut buf = [0u8; 1024];
+    match map.store_item(&mut buf, &(), hosts).await {
         Ok(()) => {
-            info!("bond saved to flash");
+            info!("host slots saved; active={}", hosts.active + 1);
             true
         }
         Err(e) => {
-            warn!("bond save failed: {:?}", defmt::Debug2Format(&e));
+            warn!("host slot save failed: {:?}", defmt::Debug2Format(&e));
             false
         }
     }

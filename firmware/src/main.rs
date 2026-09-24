@@ -24,6 +24,7 @@ mod ble;
 mod config;
 mod config_store;
 mod hid;
+mod host_slots;
 mod keypad;
 mod usb;
 
@@ -72,7 +73,7 @@ async fn main(spawner: Spawner) {
         *config::CONFIG.lock().await = c;
     }
     config_store::init(flash);
-    let stored_bond = config_store::load_bond().await;
+    let hosts = config_store::load_hosts().await.expect("host slot storage");
 
     // --- CYW43 Bluetooth on PIO0 (PWR=GP23, DIO=GP24, CS=GP25, CLK=GP29) ---
     let pwr = Output::new(p.PIN_23, Level::Low);
@@ -112,7 +113,7 @@ async fn main(spawner: Spawner) {
 
     info!("pico-numpad P2 up: starting BLE HID + WebUSB config");
     join(
-        ble::run(controller, keypad, backlight, stored_bond),
+        ble::run(controller, keypad, backlight, hosts),
         usb::run_usb(usb_driver),
     )
     .await;

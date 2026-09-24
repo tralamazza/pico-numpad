@@ -91,19 +91,30 @@ size:
 # --------------------------------------------------------------------------
 # Storage safety net.
 #
-# The key/LED config sector and the BLE bond sector live in the top 64 KiB of
-# flash (config_store.rs: config at 0x103F0000, bond sector at 0x103F1000).
-# Take a backup before any destructive storage-fault test; restore brings both
-# sectors back together. Round-trip verified byte-identical on the RP2350.
+# The whole reserved top 64 KiB of flash is dumped in one shot: config at
+# 0x103F0000 (4 KiB), the legacy single bond at 0x103F1000 (8 KiB), and the
+# three-slot journal at 0x103F3000 (8 KiB), plus 44 KiB of slack. All of it is
+# captured rather than just the ~600 bytes actually in use, so a restore cannot
+# miss a region someone forgot to name. Offsets derive from config_store.rs; see
+# the Storage section in firmware/README.md for the derivation and the invariant
+# that keeps linked code from ever reaching 0x103F0000.
+#
+# Take a backup before any destructive storage test. Round-trip verified
+# byte-identical on the RP2350.
 #
 # The backup contains your real pairing material -- it is gitignored, keep it off
 # shared drives.
+#
+# Only one process can hold the debug probe, so stop any lingering `just flash`
+# RTT capture before running these. Note that `probe-rs write` cannot restore
+# flash -- it only accepts RAM addresses -- which is why restore goes through
+# `download --binary-format bin --base-address`.
 BACKUP := "pico-numpad-config-backup.bin"
 STORAGE_BASE := "0x103F0000"
-# 16384 x 32-bit words = 64 KiB, covering the config sector and the bond sector.
+# 16384 x 32-bit words = 64 KiB, the entire reserved region.
 STORAGE_WORDS := "16384"
 
-# Back up the config + BLE bond sectors over SWD (read-only).
+# Dump the reserved region over SWD (read-only). Stop other probe-rs sessions first.
 backup-storage:
     probe-rs read --chip RP235x -f binary -o {{BACKUP}} b32 {{STORAGE_BASE}} {{STORAGE_WORDS}}
     @echo "backed up 64 KiB from {{STORAGE_BASE}} to {{BACKUP}}"
@@ -114,7 +125,7 @@ verify-storage:
     probe-rs read --chip RP235x -f binary -o /tmp/pico-numpad-reread.bin b32 {{STORAGE_BASE}} {{STORAGE_WORDS}}
     cmp {{BACKUP}} /tmp/pico-numpad-reread.bin && echo "round-trip: byte-identical"
 
-# Restore the config + bond sectors from the backup, then verify the write.
+# Restore the reserved region from the backup, then verify the write.
 restore-storage:
     @test -f {{BACKUP}} || { echo "no {{BACKUP}}; refusing to restore. Run 'just backup-storage' first."; exit 1; }
     probe-rs download --chip RP235x --binary-format bin --base-address {{STORAGE_BASE}} --verify {{BACKUP}}

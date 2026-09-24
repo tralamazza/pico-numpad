@@ -250,43 +250,92 @@ remain in use; the Pico does not reboot into unsaved state.
 
 ## Storage
 
-All storage lies in the reserved top 64 KiB of the 4 MiB flash:
+All non-volatile state lives in the **reserved top 64 KiB** of the 4 MiB QSPI
+flash. Every offset is derived in `src/config_store.rs`, so this table is the
+arithmetic rather than a hand-maintained guess:
 
-| Flash offset | Use |
-| --- | --- |
-| `0x3f0000..0x3f1000` | Key/LED configuration |
-| `0x3f1000..0x3f3000` | Legacy single bond (migration source; erased by explicit recovery reset) |
-| `0x3f3000..0x3f5000` | Versioned three-slot journal and selected slot |
+```
+FLASH_SIZE    = 4 MiB
+CONFIG_OFFSET = FLASH_SIZE - 64 KiB            = 0x3F0000
+SECTOR        = ERASE_SIZE (embassy-rp 0.10)   = 4096
+BOND_OFFSET   = CONFIG_OFFSET + SECTOR         = 0x3F1000   BOND_LEN  = 8 KiB
+HOSTS_OFFSET  = BOND_OFFSET + BOND_LEN        = 0x3F3000   HOSTS_LEN = 8 KiB
+```
 
-The entire slot record is saved together using `sequential-storage`. Migration
-writes the new journal before using it, leaving the old bond intact. Once a new
-record exists, clearing slot 1 cannot resurrect the legacy bond on next boot.
-Downgrading to the old firmware will still use the old single-bond region.
+| Region | Relative | Absolute | Size | Use |
+| --- | --- | --- | --- | --- |
+| Config | `0x3F0000` | `0x103F0000` | 4 KiB | Key/LED configuration (exactly one erase sector) |
+| Legacy bond | `0x3F1000` | `0x103F1000` | 8 KiB | Pre-three-slot single bond. Migration source; erased by an explicit recovery reset |
+| Slot journal | `0x3F3000` | `0x103F3000` | 8 KiB | Versioned three-slot record + selected slot |
+| *(slack)* | `0x3F5000`–`0x400000` | `0x103F5000`–`0x10400000` | 44 KiB | Unused |
+
+### The invariant that keeps code off your pairing data
+
+`memory.x` caps the firmware at `FLASH : ORIGIN = 0x10000000, LENGTH = 4032K`,
+which ends at `0x103F0000` — **exactly where the config sector begins**. That is
+deliberate, and it is the only thing standing between a large link and your
+pairing material.
+
+**Never raise that `LENGTH` to 4096K.** The linker would then place code over the
+storage region and flashing would overwrite the config, the legacy bond, and the
+slot journal. The 64 KiB reservation is a deliberate cost: the ship image is
+~665 KiB against a 4032 KiB budget, so there is no pressure to reclaim it.
+
+### What actually gets written
+
+Dumping a live backup and scanning for non-erased (non-`0xFF`) bytes confirms the
+firmware writes nothing outside the declared regions:
+
+```
+0x103F0000..0x103F0020     32 bytes   config
+0x103F1000..0x103F1074    115 bytes   legacy single bond
+0x103F3000..0x103F31C4    452 bytes   slot journal
+```
+
+The regions look sparse because `sequential-storage` appends instead of rewriting
+in place; the free space absorbs wear and lets records grow.
+
+### Migration and clearing
+
+The whole slot record is saved together via `sequential-storage`. Migration writes
+the new journal *before* using it, leaving the old bond intact, so an interrupted
+migration cannot lose both. Once a journal record exists, clearing slot 1 cannot
+resurrect the legacy bond on next boot. Downgrading to the old firmware still
+reads the old single-bond region.
 
 ### Back up before destructive storage tests
 
-The offsets above are relative to the flash base at `0x10000000`, so the whole
-reserved region is `0x103F0000..0x103F3000` in absolute terms. `just`
-recipes dump and restore all of it over SWD in one shot:
+The relative offsets above are from the flash base at `0x10000000`; the whole
+reserved region is `0x103F0000..0x10400000` in absolute terms. The `just` recipes
+dump and restore **all 64 KiB** in one shot over SWD — the entire reservation, not
+just the ~600 bytes in use, so a restore cannot miss a region someone forgot to
+name:
 
 ```sh
-just backup-storage    # dump 64 KiB from 0x103F0000 to pico-numpad-config-backup.bin
+just backup-storage    # dump 64 KiB from 0x103F0000 -> pico-numpad-config-backup.bin
 just verify-storage    # re-read the region and diff it against the file
 just restore-storage   # write the file back and verify (refuses if no backup exists)
 ```
 
 The backup contains your **real pairing material**. It is gitignored; keep it off
-shared drives. `restore-storage` deliberately refuses to run when the backup file
-is missing, so you cannot restore over a state you never captured.
+shared drives and treat it like a key. `restore-storage` deliberately refuses to
+run when the backup file is missing, so you cannot restore over a state you never
+captured.
+
+**Stop every other `probe-rs` session first.** Only one session can hold the debug
+probe, so a lingering `probe-rs run` — an RTT capture from `just flash`, for
+example — makes the download fail or hang.
+
+`probe-rs write` **cannot** restore flash; it only accepts RAM addresses. Use
+`probe-rs download --binary-format bin --base-address 0x103F0000`, which is what
+the recipe runs.
 
 Verified on hardware: a read → download → re-read round-trip of the whole 64 KiB
-came back byte-identical, and the device afterwards still reported
-`config loaded from flash` / `host slots loaded; active=1` and reconnected its
-encrypted slot-1 bond.
-
-Take this backup before running the journal-fault injection checks in
-[`../PLAN.md`](../PLAN.md). `probe-rs write` cannot be used for the restore -- it
-only accepts RAM addresses.
+came back byte-identical, and the device afterwards reported
+`config loaded from flash` / `host slots loaded; active=1` and re-established its
+encrypted slot-1 bond. Restoring is also the quickest recovery when a bond reset
+has left hosts holding bonds the device no longer has — see
+[*Force re-pairing*](#force-re-pairing).
 
 ## Lint and tests
 

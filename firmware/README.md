@@ -308,8 +308,14 @@ just dupcheck 30         # capture 30s; type each key once, then hold a few
 `dupcheck-selftest` is portable to any machine with `swiftc` and needs no device.
 `dupcheck` needs macOS **Input Monitoring** permission for your terminal app
 (System Settings > Privacy & Security > Input Monitoring); without it no reports
-arrive, and the tool reports `INCONCLUSIVE` rather than passing. A run that
-captures nothing is never a pass.
+arrive.
+
+**A PASS requires both transports to have been observed.** The tool returns
+`INCONCLUSIVE`, never `PASS`, when: nothing was captured; only one transport
+produced reports (the other link looked fine but was silent, so a duplicate could
+not have been seen); or both transports reported but no key press was observed,
+only empty/release reports. Read the summary line before believing the verdict --
+if only `USB` is listed, the BLE side was never tested.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain

@@ -91,9 +91,13 @@ brought the repo to its current state.
   (confirmed by user).
 - [ ] Explicitly verify no duplicate input with USB and BLE both connected.
   `just dupcheck 30` (macOS, needs Input Monitoring) captures HID reports from
-  both transports and fails if the same key set arrives on both; the detection
-  logic itself is covered by `just dupcheck-selftest`, which passes. The live
-  capture still needs a person to type the keys.
+  both transports and fails if the same key set arrives on both. **A PASS only
+  counts if the summary lists both `USB` and `Bluetooth Low Energy` with non-zero
+  reports** -- a run that saw one transport alone is reported INCONCLUSIVE, not a
+  pass. The first live run on the bench captured USB only (38 reports, report ID
+  1) with no BLE line at all and still said PASS, which is exactly the false PASS
+  the harness used to produce. Confirm the BLE link is connected and reporting
+  before trusting a result.
 
 ## Build hygiene and tooling pass
 
@@ -171,11 +175,18 @@ write` cannot do this restore; it only accepts RAM addresses.
 via `IOHIDManager`, tags each by transport, and fails if the same key set
 arrives on both USB and BLE. Comparison is by key signature, not raw bytes, so a
 different report ID or length between the transports cannot mask a duplicate.
-`just dupcheck-selftest` verifies that logic against synthetic events (cross-
-transport duplicate, cross-report-ID duplicate, outside-window, different keys,
-one-transport-only, releases, empty capture) and passes. Live capture needs macOS
-Input Monitoring permission and a person to type, so the end-to-end check above
-is still open.
+`just dupcheck-selftest` verifies that logic against synthetic events and passes
+(10 cases: cross-transport duplicate, cross-report-ID duplicate, outside window,
+different keys, releases, USB-only, BLE-only, single report,
+both-transports-but-only-releases, empty capture).
+
+The first version of this harness could report PASS when only one transport had
+been observed, because it only special-cased "zero events". A live run produced
+`USB [id 1]: 38 report(s)` with no BLE line at all and still said PASS -- a
+result that proved nothing. `evaluate` now requires at least two distinct
+transports **and** at least one non-release report before it can return PASS;
+anything short of that is INCONCLUSIVE. The USB-only, BLE-only and
+releases-only selftest cases exist specifically to hold that behaviour.
 
 ### Gate status
 

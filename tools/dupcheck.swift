@@ -35,7 +35,8 @@ let reportCapacity = 64
 
 struct Event {
     let t: Double // ms since start
-    let transport: String
+    let transport: String // "USB", "Bluetooth Low Energy", ...
+    let reportID: UInt32
     let bytes: [UInt8]
     let sig: String
 }
@@ -65,7 +66,7 @@ func isRelease(_ event: Event) -> Bool {
 enum Verdict {
     case pass
     case fail([(Event, Event)])
-    case inconclusive
+    case inconclusive(String)
 
     var code: Int32 {
         switch self {
@@ -77,9 +78,25 @@ enum Verdict {
 }
 
 /// The whole point of the tool, kept free of IOKit so it can be self-tested.
+///
+/// PASS requires *both* transports to have been observed. A run that only saw one
+/// transport cannot have detected a cross-transport duplicate, so it is
+/// INCONCLUSIVE rather than PASS -- otherwise a BLE link that never reported would
+/// look like a clean result.
 func evaluate(_ events: [Event]) -> Verdict {
-    if events.isEmpty { return .inconclusive }
+    let transports = Set(events.map { $0.transport })
+    if events.isEmpty {
+        return .inconclusive("no reports were captured at all")
+    }
+    if transports.count < 2 {
+        return .inconclusive("only \(transports.first!) was captured -- "
+            + "the other transport produced no reports, so a duplicate could not have been seen")
+    }
     let presses = events.filter { !isRelease($0) }
+    if presses.isEmpty {
+        return .inconclusive("both transports reported, but no key press was observed "
+            + "(only empty/release reports) -- nothing was actually tested")
+    }
     var duplicates: [(Event, Event)] = []
     for a in presses {
         for b in presses where a.transport != b.transport {
@@ -100,13 +117,12 @@ func report(_ events: [Event], _ verdict: Verdict) {
     print("  non-release reports: \(events.filter { !isRelease($0) }.count)")
 
     switch verdict {
-    case .inconclusive:
-        print("""
-              VERDICT: INCONCLUSIVE -- nothing was captured.
-              Grant Input Monitoring to your terminal app (System Settings >
-              Privacy & Security > Input Monitoring), quit and reopen the
-              terminal, then run this again.
-              """)
+    case .inconclusive(let reason):
+        print("  VERDICT: INCONCLUSIVE -- \(reason).")
+        print("  This is not a pass. Check that both transports are connected and reporting,")
+        print("  and that Input Monitoring is granted to your terminal app (System Settings >")
+        print("  Privacy & Security > Input Monitoring); after granting it, quit and reopen")
+        print("  the terminal and run this again.")
     case .pass:
         print("  VERDICT: PASS -- no key set was delivered on both transports.")
     case .fail(let duplicates):
@@ -124,8 +140,8 @@ func report(_ events: [Event], _ verdict: Verdict) {
 /// Feed the detector synthetic events so the verdict logic is verified even where
 /// nobody can press keys. Each case asserts the verdict evaluate() produces.
 func selftest() -> Int32 {
-    func ev(_ t: Double, _ transport: String, _ bytes: [UInt8]) -> Event {
-        Event(t: t, transport: transport, bytes: bytes, sig: keySignature(bytes))
+    func ev(_ t: Double, _ transport: String, _ bytes: [UInt8], _ reportID: UInt32 = 0) -> Event {
+        Event(t: t, transport: transport, reportID: reportID, bytes: bytes, sig: keySignature(bytes))
     }
     let keyA: [UInt8] = [0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00] // '1'
     let release: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
@@ -134,39 +150,38 @@ func selftest() -> Int32 {
     let keyB: [UInt8] = [0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00] // '2'
 
     var failures = 0
-    func check(_ name: String, _ events: [Event], expectFail: Bool) {
-        let verdict = evaluate(events)
-        let failed: Bool
-        switch verdict {
-        case .fail: failed = true
-        case .pass, .inconclusive: failed = false
+    func check(_ name: String, _ events: [Event], expect: String) {
+        let verdict: String
+        switch evaluate(events) {
+        case .pass: verdict = "pass"
+        case .fail: verdict = "fail"
+        case .inconclusive: verdict = "inconclusive"
         }
-        let ok = (failed == expectFail)
-        print("  [\(ok ? "ok" : "FAIL")] \(name)")
+        let ok = (verdict == expect)
+        print("  [\(ok ? "ok" : "FAIL")] \(name) (got \(verdict), want \(expect))")
         if !ok { failures += 1 }
     }
 
-    check("same key on both transports inside the window -> FAIL",
-          [ev(100, "USB", keyA), ev(120, "Bluetooth Low Energy", keyA)], expectFail: true)
-    check("same key with a different report ID on the other transport -> FAIL",
-          [ev(100, "USB", keyA), ev(120, "Bluetooth Low Energy", keyAWithReportID)], expectFail: true)
-    check("same key on both transports outside the window -> PASS",
-          [ev(100, "USB", keyA), ev(700, "Bluetooth Low Energy", keyA)], expectFail: false)
-    check("different keys on the two transports -> PASS",
-          [ev(100, "USB", keyA), ev(110, "Bluetooth Low Energy", keyB)], expectFail: false)
-    check("all traffic on one transport -> PASS",
-          [ev(100, "USB", keyA), ev(200, "USB", keyB)], expectFail: false)
-    check("releases on both transports are not duplicates -> PASS",
-          [ev(100, "USB", release), ev(105, "Bluetooth Low Energy", release)], expectFail: false)
-    check("no events at all -> not a FAIL", [], expectFail: false)
-    switch evaluate([]) {
-    case .inconclusive: print("  [ok] empty capture reports INCONCLUSIVE, not PASS")
-    default: print("  [FAIL] empty capture did not report INCONCLUSIVE"); failures += 1
-    }
-    switch evaluate([ev(100, "USB", keyA)]) {
-    case .pass: print("  [ok] single-transport capture reports PASS")
-    default: print("  [FAIL] single-transport capture did not report PASS"); failures += 1
-    }
+    check("same key on both transports inside the window", [ev(100, "USB", keyA), ev(120, "BLE", keyA)],
+          expect: "fail")
+    check("same key with a different report ID on the other transport",
+          [ev(100, "USB", keyA, 1), ev(120, "BLE", keyAWithReportID, 2)], expect: "fail")
+    check("same key on both transports outside the window",
+          [ev(100, "USB", keyA), ev(700, "BLE", keyA)], expect: "pass")
+    check("different keys on the two transports",
+          [ev(100, "USB", keyA), ev(110, "BLE", keyB)], expect: "pass")
+    check("releases on both transports are not duplicates",
+          [ev(100, "USB", keyA), ev(105, "BLE", keyB), ev(200, "USB", release), ev(205, "BLE", release)],
+          expect: "pass")
+
+    // The class of false PASS this harness originally produced: a run that only saw
+    // one transport cannot have detected a cross-transport duplicate.
+    check("traffic on USB only", [ev(100, "USB", keyA), ev(200, "USB", keyB)], expect: "inconclusive")
+    check("traffic on BLE only", [ev(100, "BLE", keyA), ev(200, "BLE", keyB)], expect: "inconclusive")
+    check("one report on one transport only", [ev(100, "USB", keyA)], expect: "inconclusive")
+    check("both transports live but only releases observed",
+          [ev(100, "USB", release), ev(105, "BLE", release)], expect: "inconclusive")
+    check("no events at all", [], expect: "inconclusive")
 
     print(failures == 0 ? "selftest: PASS" : "selftest: \(failures) FAILURE(S)")
     return failures == 0 ? 0 : 1
@@ -185,13 +200,15 @@ final class Recorder {
     private var storage: [Event] = []
     private let start = Date()
 
-    func record(_ transport: String, _ bytes: [UInt8]) {
+    func record(_ transport: String, _ reportID: UInt32, _ bytes: [UInt8]) {
         lock.lock()
         let t = Date().timeIntervalSince(start) * 1000.0
-        let event = Event(t: t, transport: transport, bytes: bytes, sig: keySignature(bytes))
+        let event = Event(t: t, transport: transport, reportID: reportID,
+                          bytes: bytes, sig: keySignature(bytes))
         storage.append(event)
         lock.unlock()
-        print(String(format: "[%7.1f ms] %-22@ %@", t, transport as NSString, hex(bytes)))
+        print(String(format: "[%7.1f ms] %-22@ id=%u %@",
+                    t, transport as NSString, reportID, hex(bytes)))
     }
 
     var all: [Event] {
@@ -231,7 +248,7 @@ let reportCallback: IOHIDReportCallback = { ctx, result, _, reportType, reportID
     else { return }
     let info = Unmanaged<DevInfo>.fromOpaque(ctx).takeUnretainedValue()
     let bytes = Array(UnsafeBufferPointer(start: report, count: Int(reportLength)))
-    recorder.record("\(info.transport) [id \(reportID)]", bytes)
+    recorder.record(info.transport, reportID, bytes)
 }
 
 func register(_ device: IOHIDDevice) {

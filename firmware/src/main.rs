@@ -1,30 +1,37 @@
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-use embassy_rp::bind_interrupts;
-use embassy_rp::dma::{self, Channel};
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::i2c::{self, Config as I2cConfig, I2c};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH4, I2C0, PIO0};
-use embassy_rp::pio::Pio;
-use embassy_rp::spi::{Config as SpiConfig, Spi};
 use cyw43::{aligned_bytes, Cyw43439};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::{info, unwrap};
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_rp::bind_interrupts;
+use embassy_rp::dma::{self, Channel};
+use embassy_rp::flash::Flash;
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::i2c::{self, Config as I2cConfig, I2c};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH4, I2C0, PIO0, USB};
+use embassy_rp::pio::Pio;
+use embassy_rp::spi::{Config as SpiConfig, Spi};
+use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use static_cell::StaticCell;
 use trouble_host::prelude::ExternalController;
 use {defmt_rtt as _, panic_probe as _};
 
 mod backlight;
 mod ble;
+mod config;
+mod config_store;
 mod hid;
 mod keypad;
+mod usb;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
     I2C0_IRQ => i2c::InterruptHandler<I2C0>;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH4>;
+    USBCTRL_IRQ => UsbInterruptHandler<USB>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH4>;
 });
 
 #[embassy_executor::task]
@@ -58,6 +65,14 @@ async fn main(spawner: Spawner) {
     let spi = Spi::new_txonly(p.SPI0, p.PIN_18, p.PIN_19, p.DMA_CH4, Irqs, spi_cfg);
     let mut backlight = backlight::Backlight::new(spi, cs);
     backlight.set_brightness(0x08);
+
+    // --- Config store: last 64 KiB of QSPI flash ---
+    let mut flash: config_store::ConfigFlash = Flash::new(p.FLASH, p.DMA_CH2, Irqs);
+    if let Some(c) = config_store::load(&mut flash).await {
+        *config::CONFIG.lock().await = c;
+    }
+    config_store::init(flash);
+    let stored_bond = config_store::load_bond().await;
 
     // --- CYW43 Bluetooth on PIO0 (PWR=GP23, DIO=GP24, CS=GP25, CLK=GP29) ---
     let pwr = Output::new(p.PIN_23, Level::Low);
@@ -93,7 +108,12 @@ async fn main(spawner: Spawner) {
         .await;
 
     let controller: ExternalController<_, 10> = ExternalController::new(bt_device);
+    let usb_driver = UsbDriver::new(p.USB, Irqs);
 
-    info!("pico-numpad P1 up: starting BLE HID");
-    ble::run(controller, keypad, backlight).await;
+    info!("pico-numpad P2 up: starting BLE HID + WebUSB config");
+    join(
+        ble::run(controller, keypad, backlight, stored_bond),
+        usb::run_usb(usb_driver),
+    )
+    .await;
 }

@@ -2,19 +2,20 @@
 //!
 //! Exposes the Human Interface Device service (0x1812) with a single boot-keyboard
 //! input report, plus a minimal Device Information service (0x180A) carrying the
-//! PnP ID required by HOGP. Security is left open for now (no bonding/encryption).
+//! PnP ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
 
 // The `#[gatt_server]`/`#[gatt_service]` macros rebuild the structs and drop
 // per-field attributes, so service fields the app never reads (e.g. `dis`) are
 // reported as dead even though the generated registration uses them.
 #![allow(dead_code)]
 
+use defmt::{debug, info, warn};
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
-use defmt::{info, warn};
 use trouble_host::prelude::*;
 
 use crate::backlight::{Backlight, NUM_LEDS};
+use crate::config::{led_mode, CONFIG};
 use crate::hid::{build_report, REPORT_LEN, REPORT_MAP};
 use crate::keypad::Keypad;
 
@@ -30,24 +31,24 @@ pub struct Server {
 #[gatt_service(uuid = service::HUMAN_INTERFACE_DEVICE)]
 struct HidService {
     /// HID Information: bcdHID 1.11, country 0x00, normally-connectable.
-    #[characteristic(uuid = characteristic::HID_INFORMATION, read, value = [0x11u8, 0x01, 0x00, 0x02])]
+    #[characteristic(uuid = characteristic::HID_INFORMATION, read, value = [0x11u8, 0x01, 0x00, 0x02], permissions(encrypted))]
     info: [u8; 4],
 
     /// Report Map: boot-keyboard descriptor.
-    #[characteristic(uuid = characteristic::REPORT_MAP, read, value = REPORT_MAP)]
+    #[characteristic(uuid = characteristic::REPORT_MAP, read, value = REPORT_MAP, permissions(encrypted))]
     report_map: &'static [u8],
 
-    /// HID Control Point: 0x00 normal, 0x01 halt.
-    #[characteristic(uuid = characteristic::HID_CONTROL_POINT, write_without_response)]
-    control_point: (),
+    /// HID Control Point: 0x00 suspend, 0x01 exit suspend.
+    #[characteristic(uuid = characteristic::HID_CONTROL_POINT, write_without_response, permissions(encrypted))]
+    control_point: u8,
 
     /// Keyboard input report (Report ID 1).
-    #[characteristic(uuid = characteristic::REPORT, read, notify, value = [1u8, 0, 0, 0, 0, 0, 0, 0, 0])]
-    #[descriptor(uuid = descriptors::REPORT_REFERENCE, read, value = [0x01u8, 0x01])]
+    #[characteristic(uuid = characteristic::REPORT, read, notify, value = [0u8; REPORT_LEN], permissions(encrypted))]
+    #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x01u8, 0x01])]
     report: [u8; REPORT_LEN],
 
     /// Protocol Mode: 1 = report protocol.
-    #[characteristic(uuid = characteristic::PROTOCOL_MODE, read, write, value = 1u8)]
+    #[characteristic(uuid = characteristic::PROTOCOL_MODE, read, write_without_response, value = 1u8, permissions(encrypted))]
     protocol_mode: u8,
 }
 
@@ -60,8 +61,8 @@ struct DisService {
     #[characteristic(uuid = characteristic::MODEL_NUMBER_STRING, read, value = "Pico RGB Keypad")]
     model: &'static str,
 
-    /// PnP ID: vendor source 0x01 (USB-IF), VID 0x2E8A, PID 0x0001, ver 0x0100.
-    #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x01u8, 0x8a, 0x2e, 0x01, 0x00, 0x00, 0x01])]
+    /// PnP ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x0001, ver 0x0100.
+    #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x02u8, 0x8a, 0x2e, 0x01, 0x00, 0x00, 0x01])]
     pnp_id: [u8; 7],
 }
 
@@ -73,12 +74,19 @@ pub async fn run<C: Controller>(
     controller: C,
     keypad: Keypad<'static>,
     backlight: Backlight<'static>,
+    stored_bond: Option<BondInformation>,
 ) {
     let address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
     let mut resources: HostResources<DefaultPacketPool, 1, 2> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .build();
+
+    if let Some(bond) = stored_bond {
+        if let Err(e) = stack.add_bond_information(bond) {
+            warn!("stored bond rejected: {:?}", e);
+        }
+    }
 
     let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: "pico-numpad",
@@ -92,7 +100,11 @@ pub async fn run<C: Controller>(
     let peripheral = stack.peripheral();
 
     // Run the BLE host packet processor concurrently with the app loop.
-    select(runner.run(), app_loop(peripheral, &server, keypad, backlight)).await;
+    select(
+        runner.run(),
+        app_loop(peripheral, &server, keypad, backlight),
+    )
+    .await;
 }
 
 async fn app_loop<C: Controller>(
@@ -103,7 +115,11 @@ async fn app_loop<C: Controller>(
 ) {
     let mut adv_data = [0u8; 31];
     loop {
-        set_advertising_pattern(&mut backlight).await;
+        let (mode, brightness) = {
+            let cfg = CONFIG.lock().await;
+            (cfg.led_mode, cfg.brightness)
+        };
+        set_advertising_pattern(&mut backlight, mode, brightness).await;
 
         let n = match AdStructure::encode_slice(
             &[
@@ -139,25 +155,30 @@ async fn app_loop<C: Controller>(
         };
 
         info!("advertising");
-        let conn = match advertiser.accept().await {
-            Ok(c) => c,
-            Err(e) => {
+        match select(advertiser.accept(), Timer::after_millis(500)).await {
+            Either::First(Ok(conn)) => {
+                if let Err(e) = conn.set_bondable(true) {
+                    warn!("set bondable failed: {:?}", e);
+                }
+                let gatt = match conn.with_attribute_server(server) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        warn!("gatt attach failed: {:?}", e);
+                        continue;
+                    }
+                };
+                if let Err(e) = gatt.raw().request_security() {
+                    warn!("security request failed: {:?}", e);
+                }
+                info!("connected");
+                connection_task(&gatt, &server.hid.report, &mut keypad, &mut backlight).await;
+                info!("disconnected, re-advertising");
+            }
+            Either::First(Err(e)) => {
                 warn!("accept failed: {:?}", e);
-                continue;
             }
-        };
-
-        let gatt = match conn.with_attribute_server(server) {
-            Ok(g) => g,
-            Err(e) => {
-                warn!("gatt attach failed: {:?}", e);
-                continue;
-            }
-        };
-
-        info!("connected");
-        connection_task(&gatt, &server.hid.report, &mut keypad, &mut backlight).await;
-        info!("disconnected, re-advertising");
+            Either::Second(()) => {}
+        }
     }
 }
 
@@ -168,13 +189,29 @@ async fn connection_task(
     keypad: &mut Keypad<'static>,
     backlight: &mut Backlight<'static>,
 ) {
-    let mut last: u16 = 0xFFFF;
+    let mut painted_pressed: u16 = 0xFFFF;
+    let mut painted_mode = 0xFF;
+    let mut painted_brightness = 0xFF;
     loop {
         match select(gatt.next(), Timer::after_millis(5)).await {
             Either::First(event) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("disconnect: {:?}", reason);
                     return;
+                }
+                GattConnectionEvent::PairingComplete {
+                    security_level,
+                    bond,
+                } => {
+                    info!("pairing complete: {:?}", security_level);
+                    if let Some(bond) = bond {
+                        if !crate::config_store::save_bond(&bond).await {
+                            warn!("could not persist bond");
+                        }
+                    }
+                }
+                GattConnectionEvent::PairingFailed(err) => {
+                    warn!("pairing failed: {:?}", err);
                 }
                 GattConnectionEvent::Gatt { event } => {
                     if let Ok(reply) = event.accept() {
@@ -188,35 +225,58 @@ async fn connection_task(
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                if pressed != last {
-                    let value = build_report(pressed);
+                let (keymap, mode, brightness) = {
+                    let cfg = CONFIG.lock().await;
+                    (cfg.keymap, cfg.led_mode, cfg.brightness)
+                };
+
+                let mut need_paint = false;
+                if pressed != painted_pressed {
+                    let value = build_report(pressed, &keymap);
+                    debug!(
+                        "keys={=u16:04x} subscribed={} report={=[u8]:02x}",
+                        pressed,
+                        report.should_notify(gatt),
+                        value
+                    );
                     if let Err(e) = report.notify(gatt, &value, true).await {
                         warn!("notify failed: {:?}", e);
                     }
-                    paint(backlight, pressed).await;
-                    last = pressed;
+                    painted_pressed = pressed;
+                    need_paint = true;
+                }
+                if need_paint || mode != painted_mode || brightness != painted_brightness {
+                    backlight.set_brightness(brightness);
+                    paint(backlight, pressed, mode).await;
+                    painted_mode = mode;
+                    painted_brightness = brightness;
                 }
             }
         }
     }
 }
 
-async fn paint(backlight: &mut Backlight<'static>, pressed: u16) {
+async fn paint(backlight: &mut Backlight<'static>, pressed: u16, mode: u8) {
     let mut leds = [[0u8; 3]; NUM_LEDS];
-    for i in 0..NUM_LEDS {
-        leds[i] = if pressed & (1 << i) != 0 {
-            [0, 255, 0]
-        } else {
-            [4, 4, 4]
-        };
+    if mode != led_mode::OFF {
+        for i in 0..NUM_LEDS {
+            leds[i] = if pressed & (1 << i) != 0 {
+                [0, 255, 0]
+            } else {
+                [4, 4, 4]
+            };
+        }
     }
     let _ = backlight.write(&leds).await;
 }
 
-async fn set_advertising_pattern(backlight: &mut Backlight<'static>) {
+async fn set_advertising_pattern(backlight: &mut Backlight<'static>, mode: u8, brightness: u8) {
+    backlight.set_brightness(brightness);
     let mut leds = [[0u8; 3]; NUM_LEDS];
-    for i in 0..NUM_LEDS {
-        leds[i] = [0, 0, 40]; // dim blue while advertising
+    if mode != led_mode::OFF {
+        for i in 0..NUM_LEDS {
+            leds[i] = [0, 0, 40]; // dim blue while advertising
+        }
     }
     let _ = backlight.write(&leds).await;
 }

@@ -34,7 +34,9 @@ impl<'d> Keypad<'d> {
     /// Raw 16-bit input register value (bit set = line high).
     pub async fn read_raw(&mut self) -> Result<u16, Error> {
         let mut buf = [0u8; 2];
-        self.i2c.write_read_async(ADDR, [REG_INPUT0], &mut buf).await?;
+        self.i2c
+            .write_read_async(ADDR, [REG_INPUT0], &mut buf)
+            .await?;
         Ok(u16::from(buf[0]) | (u16::from(buf[1]) << 8))
     }
 

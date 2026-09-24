@@ -1,9 +1,8 @@
 //! HID report descriptor and report construction for the boot-keyboard profile.
 //!
 //! The device exposes a single input report (Report ID 1) with the standard
-//! 8-byte boot-keyboard layout: `[modifiers, reserved, key0..key5]`. Over GATT
-//! the Report characteristic value is prefixed with the Report ID, so the bytes
-//! actually notified are `[1, modifiers, reserved, key0..key5]` (9 bytes).
+//! 8-byte keyboard layout: `[modifiers, reserved, key0..key5]`. Over GATT the
+//! Report ID is carried by the Report Reference descriptor, not the payload.
 
 /// Boot-keyboard HID report descriptor (Report ID 1).
 ///
@@ -35,43 +34,47 @@ pub const REPORT_MAP: &[u8] = &[
     0xC0, // End Collection
 ];
 
-/// Report ID for the keyboard input report.
-pub const REPORT_ID: u8 = 0x01;
+/// Length of the GATT Report characteristic value (without a Report ID prefix).
+pub const REPORT_LEN: usize = 8;
 
-/// Length of the GATT Report characteristic value (report ID + 8-byte boot report).
-pub const REPORT_LEN: usize = 9;
-
-/// Default physical-key-bit -> HID usage code map (numpad layout).
-///
-/// Index is the TCA9555 bit (0..15). The physical orientation of the bits is
-/// assumed row-major; this map is the single place to adjust once the real
-/// key positions are confirmed on hardware.
-pub const KEYMAP: [u8; 16] = [
-    0x5F, 0x60, 0x61, 0x54, // 7 8 9 /
-    0x5C, 0x5D, 0x5E, 0x55, // 4 5 6 *
-    0x59, 0x5A, 0x5B, 0x56, // 1 2 3 -
-    0x62, 0x63, 0x58, 0x57, // 0 . Enter +
-];
-
-/// Build a GATT Report characteristic value from a 16-bit pressed mask.
+/// Build a GATT Report characteristic value from a 16-bit pressed mask and a
+/// per-key HID usage map (index = physical key bit).
 ///
 /// Modifier usages (0xE0..=0xE7) set the modifier byte; all other usages fill
 /// the six keycode slots in order.
-pub fn build_report(pressed: u16) -> [u8; REPORT_LEN] {
+pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
     let mut report = [0u8; REPORT_LEN];
-    report[0] = REPORT_ID;
-    let mut slot = 3; // report[1]=modifiers, report[2]=reserved, report[3..]=keys
+    let mut slot = 2; // report[0]=modifiers, report[1]=reserved, report[2..]=keys
     for bit in 0..16 {
         if pressed & (1 << bit) == 0 {
             continue;
         }
-        let usage = KEYMAP[bit];
+        let usage = keymap[bit];
         if (0xE0..=0xE7).contains(&usage) {
-            report[1] |= 1 << (usage - 0xE0);
+            report[0] |= 1 << (usage - 0xE0);
         } else if slot < REPORT_LEN {
             report[slot] = usage;
             slot += 1;
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gatt_report_has_no_id_prefix_and_release_clears_all_bytes() {
+        let keymap = [0x5f; 16];
+        assert_eq!(build_report(1, &keymap), [0, 0, 0x5f, 0, 0, 0, 0, 0]);
+        assert_eq!(build_report(0, &keymap), [0; 8]);
+    }
+
+    #[test]
+    fn modifiers_and_six_keys_have_distinct_slots() {
+        let mut keymap = [0; 16];
+        keymap[..8].copy_from_slice(&[0xe1, 0xe4, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(build_report(0xff, &keymap), [0x12, 0, 4, 5, 6, 7, 8, 9]);
+    }
 }

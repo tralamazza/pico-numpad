@@ -3,7 +3,7 @@ MEMORY {
      * Pico 2 W has 4 MiB of flash. We cap the code region here and reserve the
      * top 64 KiB (0x103F0000..) for the config store in a later phase.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 4096K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 4032K
 
     /* RAM: 8 striped banks (SRAM0-7) for performance. */
     RAM : ORIGIN = 0x20000000, LENGTH = 512K
@@ -24,7 +24,8 @@ SECTIONS {
 
 } INSERT AFTER .vector_table;
 
-_stext = ADDR(.start_block) + SIZEOF(.start_block);
+/* Keep .text aligned after the variable-size boot metadata. */
+_stext = ALIGN(ADDR(.start_block) + SIZEOF(.start_block), 8);
 
 SECTIONS {
     /* Picotool 'Binary Info' entries. */

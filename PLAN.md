@@ -81,5 +81,6 @@ Baseline: `893b405` (host slots and Clippy gate). Keep all work Clippy-clean.
 - [x] macOS `hidutil` lists USB keyboard (usage page 1, usage 6) alongside BLE.
   Read-only GET_CONFIG succeeds on unchanged vendor interface 1 / EP1.
   Existing slot-1 bond reconnects with encryption; no pairing data erased.
-- [ ] Physically verify USB typing, no duplicate input with BLE connected, and
-  BLE fallback after USB unplug; preserve all bonds during validation.
+- [x] Physically verify USB typing and BLE fallback after USB unplug
+  (confirmed by user).
+- [ ] Explicitly verify no duplicate input with USB and BLE both connected.

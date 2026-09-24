@@ -42,14 +42,14 @@ pub const REPORT_LEN: usize = 8;
 ///
 /// Modifier usages (0xE0..=0xE7) set the modifier byte; all other usages fill
 /// the six keycode slots in order.
+#[must_use]
 pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
     let mut report = [0u8; REPORT_LEN];
     let mut slot = 2; // report[0]=modifiers, report[1]=reserved, report[2..]=keys
-    for bit in 0..16 {
+    for (bit, &usage) in keymap.iter().enumerate() {
         if pressed & (1 << bit) == 0 {
             continue;
         }
-        let usage = keymap[bit];
         if (0xE0..=0xE7).contains(&usage) {
             report[0] |= 1 << (usage - 0xE0);
         } else if slot < REPORT_LEN {

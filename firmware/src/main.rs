@@ -48,7 +48,7 @@ async fn cyw43_task(
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
+    let p = embassy_rp::init(embassy_rp::config::Config::default());
 
     // --- Keypad: TCA9555 on I2C0 (SCL=GP5, SDA=GP4) ---
     let mut i2c_cfg = I2cConfig::default();

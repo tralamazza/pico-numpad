@@ -1,4 +1,4 @@
-//! APA102 (DotStar) backlight driver for the Pico RGB Keypad Base.
+//! APA102 (`DotStar`) backlight driver for the Pico RGB Keypad Base.
 //!
 //! 16 APA102 LEDs on SPI0 (DATA=MOSI=GP19, CLK=GP18) with an active-low chip
 //! select on GP17 that is asserted only for the duration of a transfer, matching

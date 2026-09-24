@@ -1,5 +1,9 @@
 //! Persistent host selection and physical-key controls, independent of the BLE HAL.
 
+// Slot ids are `u8` (persisted and handed to the BLE layer) while array indices
+// are `usize`; SLOT_COUNT is 3, so these narrowings cannot truncate.
+#![allow(clippy::cast_possible_truncation)]
+
 pub const SLOT_COUNT: usize = 3;
 pub const PLUS: u16 = 1 << 15;
 pub const SLOT_KEYS: [u16; SLOT_COUNT] = [1 << 8, 1 << 9, 1 << 10];
@@ -37,10 +41,12 @@ impl<B> Slots<B> {
 }
 
 /// Keep the original identity for slot 1 so its existing pairing survives migration.
+#[must_use]
 pub fn address(slot: u8) -> [u8; 6] {
     [0xff - slot, 0x8f, 0x1a, 0x05, 0xe4, 0xff]
 }
 
+#[must_use]
 pub fn name(slot: u8) -> &'static str {
     match slot {
         0 => "pico-numpad",
@@ -56,6 +62,7 @@ pub enum Action {
 }
 
 impl Action {
+    #[must_use]
     pub fn slot(self) -> u8 {
         match self {
             Self::Select(slot) | Self::Clear(slot) => slot,
@@ -72,6 +79,7 @@ pub enum Menu {
 
 /// Bonded slots are green, empty slots blue. The active slot pulses without
 /// changing its status color; a held candidate is amber until the clear fires.
+#[must_use]
 pub fn menu_colors(
     bonded: [bool; SLOT_COUNT],
     active: u8,
@@ -82,7 +90,7 @@ pub fn menu_colors(
         if menu == Menu::Holding(i as u8) {
             return [100, 40, 0];
         }
-        let level = if i == active as usize && (now / 400) % 2 == 0 {
+        let level = if i == active as usize && (now / 400).is_multiple_of(2) {
             25
         } else {
             100
@@ -117,7 +125,14 @@ pub struct Controls {
     state: State,
 }
 
+impl Default for Controls {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Controls {
+    #[must_use]
     pub fn new() -> Self {
         // Do not type keys still held through a slot-switch reboot.
         Self {
@@ -270,9 +285,9 @@ mod tests {
 
     #[test]
     fn slot_selection_never_types_menu_keys() {
-        for slot in 0..3 {
+        for (slot, &key) in SLOT_KEYS.iter().enumerate() {
             let mut c = menu();
-            let input = c.update(4_000, SLOT_KEYS[slot]);
+            let input = c.update(4_000, key);
             assert_eq!(input.keys, 0);
             assert_eq!(input.action, None);
             assert_eq!(c.update(4_100, 0).action, Some(Action::Select(slot as u8)));

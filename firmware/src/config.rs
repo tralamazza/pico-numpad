@@ -49,7 +49,7 @@ impl Config {
     }
 
     /// Serialise to a fixed record with a trailing checksum.
-    pub fn to_bytes(&self) -> [u8; CONFIG_LEN] {
+    pub fn to_bytes(self) -> [u8; CONFIG_LEN] {
         let mut b = [0u8; CONFIG_LEN];
         b[0] = MAGIC;
         b[1] = VERSION;

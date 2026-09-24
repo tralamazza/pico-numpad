@@ -4,6 +4,11 @@
 //! of the linker's code region by `memory.x`. One 4 KiB sector holds one 32-byte
 //! record; saving erases the sector and programs the record.
 
+// Flash offsets are `u32` (the NorFlash API) while flash sizes are `usize` (they
+// are generic array parameters). On the 4 MiB RP2350 part every conversion here
+// is loss-free, so the narrowing casts are intentional.
+#![allow(clippy::cast_possible_truncation)]
+
 use core::ops::Range;
 
 use defmt::{info, warn};
@@ -23,10 +28,12 @@ use crate::host_slots::Slots;
 
 /// Total QSPI flash on the Pico 2 W.
 pub const FLASH_SIZE: usize = 4 * 1024 * 1024;
-/// Offset of the config sector from the start of flash (0x103F_0000).
+/// Offset of the config sector from the start of flash (`0x103F_0000`).
 pub const CONFIG_OFFSET: u32 = (FLASH_SIZE - 64 * 1024) as u32;
-/// Offset of the BLE bond sector (0x103F_1000).
-pub const BOND_OFFSET: u32 = CONFIG_OFFSET + ERASE_SIZE as u32;
+/// Erase granularity as a flash offset.
+const SECTOR: u32 = ERASE_SIZE as u32;
+/// Offset of the BLE bond sector (`0x103F_1000`).
+pub const BOND_OFFSET: u32 = CONFIG_OFFSET + SECTOR;
 /// Size of the BLE bond storage range.
 pub const BOND_LEN: u32 = 8 * 1024;
 // A separate journal makes migration non-destructive and prevents a cleared
@@ -36,7 +43,7 @@ const HOSTS_LEN: u32 = 8 * 1024;
 
 pub type HostSlots = Slots<BondInformation>;
 
-impl<'a> PostcardValue<'a> for HostSlots {}
+impl PostcardValue<'_> for HostSlots {}
 
 pub type ConfigFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
 
@@ -65,15 +72,12 @@ pub async fn load(flash: &mut ConfigFlash) -> Option<Config> {
         warn!("config read failed");
         return None;
     }
-    match Config::from_bytes(&buf.0) {
-        Some(c) => {
-            info!("config loaded from flash");
-            Some(c)
-        }
-        None => {
-            info!("no valid config in flash");
-            None
-        }
+    if let Some(c) = Config::from_bytes(&buf.0) {
+        info!("config loaded from flash");
+        Some(c)
+    } else {
+        info!("no valid config in flash");
+        None
     }
 }
 
@@ -86,7 +90,7 @@ pub async fn save() -> bool {
     };
     let mut flash = store.flash.lock().await;
     if flash
-        .erase(CONFIG_OFFSET, CONFIG_OFFSET + ERASE_SIZE as u32)
+        .erase(CONFIG_OFFSET, CONFIG_OFFSET + SECTOR)
         .await
         .is_err()
     {
@@ -104,7 +108,7 @@ pub async fn save() -> bool {
 #[derive(Serialize, Deserialize)]
 struct StoredBond(BondInformation);
 
-impl<'a> PostcardValue<'a> for StoredBond {}
+impl PostcardValue<'_> for StoredBond {}
 
 fn bond_range() -> Range<u32> {
     BOND_OFFSET..(BOND_OFFSET + BOND_LEN)

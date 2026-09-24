@@ -46,3 +46,13 @@ embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "3
 embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 embassy-usb-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+
+# Lint gate: `cargo clippy` must stay clean. Cast lints are deliberately not
+# allowed here; scope any exception to the module that needs it (config_store.rs,
+# host_slots.rs).
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"

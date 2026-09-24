@@ -1,6 +1,6 @@
-//! WebUSB configuration interface.
+//! `WebUSB` configuration interface.
 //!
-//! Presents a vendor-specific bulk interface reachable from a browser via WebUSB
+//! Presents a vendor-specific bulk interface reachable from a browser via `WebUSB`
 //! (and from libusb/pyusb). A tiny binary protocol reads/writes the shared
 //! [`Config`]:
 //!
@@ -27,7 +27,7 @@ use crate::config::{Config, CONFIG, CONFIG_LEN};
 
 const VID: u16 = 0x2E8A;
 const PID: u16 = 0x000A;
-const MAX_PACKET: usize = 64;
+const MAX_PACKET: u16 = 64;
 
 // Windows needs a stable interface GUID to bind WinUSB without an INF.
 const DEVICE_INTERFACE_GUIDS: &[&str] = &["{2E8A000A-0000-4000-8000-00000000000A}"];
@@ -53,7 +53,7 @@ struct Endpoints<'d, D: Driver<'d>> {
     read_ep: D::EndpointOut,
 }
 
-/// Build the WebUSB device and run the protocol loop forever.
+/// Build the `WebUSB` device and run the protocol loop forever.
 pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
@@ -68,7 +68,7 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let control_buf = CONTROL_BUF.init([0u8; 64]);
     let state = WEBUSB_STATE.init(State::new());
     let webusb_config = WEBUSB_CONFIG.init(WebUsbConfig {
-        max_packet_size: MAX_PACKET as u16,
+        max_packet_size: MAX_PACKET,
         vendor_code: 1,
         landing_url: Some(Url::new("http://localhost:8080")),
     });
@@ -109,10 +109,11 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let mut func = builder.function(0xff, 0x00, 0x00);
     let mut iface = func.interface();
     let mut alt = iface.alt_setting(0xff, 0x00, 0x00, None);
-    let write_ep = alt.endpoint_bulk_in(None, MAX_PACKET as u16);
-    let read_ep = alt.endpoint_bulk_out(None, MAX_PACKET as u16);
-    drop(alt);
-    drop(iface);
+    let write_ep = alt.endpoint_bulk_in(None, MAX_PACKET);
+    let read_ep = alt.endpoint_bulk_out(None, MAX_PACKET);
+    // FunctionBuilder finalises the function descriptor when dropped, so it must
+    // go before the builder is consumed. The alt/iface builders have no Drop and
+    // are released by NLL at their last use.
     drop(func);
 
     let mut usb = builder.build();
@@ -125,12 +126,11 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
 }
 
 async fn protocol_loop<'d, D: Driver<'d>>(ep: &mut Endpoints<'d, D>) {
-    let mut buf = [0u8; MAX_PACKET];
+    let mut buf = [0u8; MAX_PACKET as usize];
     loop {
         ep.read_ep.wait_enabled().await;
-        let n = match ep.read_ep.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => continue,
+        let Ok(n) = ep.read_ep.read(&mut buf).await else {
+            continue;
         };
         if n == 0 {
             continue;
@@ -149,17 +149,14 @@ async fn protocol_loop<'d, D: Driver<'d>>(ep: &mut Endpoints<'d, D>) {
                     continue;
                 }
                 let mut arr = [0u8; CONFIG_LEN];
-                arr.copy_from_slice(&buf[1..1 + CONFIG_LEN]);
-                match Config::from_bytes(&arr) {
-                    Some(c) => {
-                        *CONFIG.lock().await = c;
-                        info!("usb: config updated");
-                        let _ = ep.write_ep.write(&resp(OK, CMD_SET)).await;
-                    }
-                    None => {
-                        warn!("usb: malformed config");
-                        let _ = ep.write_ep.write(&resp(ERR, CMD_SET)).await;
-                    }
+                arr.copy_from_slice(&buf[1..=CONFIG_LEN]);
+                if let Some(c) = Config::from_bytes(&arr) {
+                    *CONFIG.lock().await = c;
+                    info!("usb: config updated");
+                    let _ = ep.write_ep.write(&resp(OK, CMD_SET)).await;
+                } else {
+                    warn!("usb: malformed config");
+                    let _ = ep.write_ep.write(&resp(ERR, CMD_SET)).await;
                 }
             }
             CMD_SAVE => {

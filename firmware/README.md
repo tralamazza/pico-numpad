@@ -90,9 +90,25 @@ writes the new journal before using it, leaving the old bond intact. Once a new
 record exists, clearing slot 1 cannot resurrect the legacy bond on next boot.
 Downgrading to the old firmware will still use the old single-bond region.
 
-## Host-side logic tests
+## Lint and tests
 
-The key controls and report builder can be tested without hardware:
+From the repository root, `just check` runs everything that can be verified
+without hardware: `cargo fmt --check`, clippy, and the unit tests.
+
+```sh
+just check          # fmt-check + clippy + unit tests
+just clippy         # firmware clippy (embedded target) + standalone modules
+just test           # unit tests for the hardware-free logic
+```
+
+Clippy levels are configured in `Cargo.toml` (`[lints.rust] unsafe_code = "forbid"`,
+`[lints.clippy] all = "deny", pedantic = "deny"`), so a plain `cargo clippy`
+fails on any warning. Cast lints are not blanket-allowed: the two modules that
+narrow deliberately (`config_store.rs` flash offsets, `host_slots.rs` slot ids)
+carry a scoped `#![allow(clippy::cast_possible_truncation)]` with the reason.
+
+The key controls and report builder are hardware-free and are compiled directly
+by `just test` (equivalently, from `firmware/`):
 
 ```sh
 rustc --edition=2021 --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests
@@ -100,6 +116,9 @@ rustc --edition=2021 --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests
 rustc --edition=2021 --test src/hid.rs -o /tmp/pico-numpad-hid-tests
 /tmp/pico-numpad-hid-tests
 ```
+
+Those two files are linted through `clippy-driver` with the same levels as the
+crate, because a direct `rustc` invocation does not read `Cargo.toml`.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain

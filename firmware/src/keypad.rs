@@ -42,6 +42,6 @@ impl<'d> Keypad<'d> {
 
     /// Bitmask of pressed keys (bit set = pressed). Active-low inverted here.
     pub async fn read_pressed(&mut self) -> Result<u16, Error> {
-        Ok(!self.read_raw().await? & 0xFFFF)
+        Ok(!self.read_raw().await?)
     }
 }

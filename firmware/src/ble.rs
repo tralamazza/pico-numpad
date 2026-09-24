@@ -2,7 +2,7 @@
 //!
 //! Exposes the Human Interface Device service (0x1812) with a single boot-keyboard
 //! input report, plus a minimal Device Information service (0x180A) carrying the
-//! PnP ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
+//! `PnP` ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
 
 // The `#[gatt_server]`/`#[gatt_service]` macros rebuild the structs and drop
 // per-field attributes, so service fields the app never reads (e.g. `dis`) are
@@ -63,7 +63,7 @@ struct DisService {
     #[characteristic(uuid = characteristic::MODEL_NUMBER_STRING, read, value = "Pico RGB Keypad")]
     model: &'static str,
 
-    /// PnP ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x0001, ver 0x0100.
+    /// `PnP` ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x0001, ver 0x0100.
     #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x02u8, 0x8a, 0x2e, 0x01, 0x00, 0x00, 0x01])]
     pnp_id: [u8; 7],
 }
@@ -124,7 +124,7 @@ async fn app_loop<C: Controller>(
     let n = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteServiceUuids16(&HID_SERVICE_UUID),
+            AdStructure::CompleteServiceUuids16(HID_SERVICE_UUID),
             AdStructure::CompleteLocalName(host_slots::name(hosts.active).as_bytes()),
         ],
         &mut adv_data,

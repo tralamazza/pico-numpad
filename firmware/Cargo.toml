@@ -1,0 +1,42 @@
+[package]
+name = "pico-numpad"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[dependencies]
+# Embassy async runtime + RP2350 HAL
+embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-rp = { version = "0.10", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa", "binary-info"] }
+embassy-sync = { version = "0.8", features = ["defmt"] }
+embassy-futures = "0.1"
+
+# Bluetooth (CYW43 controller + Trouble BLE host)
+cyw43 = { version = "0.7", features = ["defmt", "firmware-logs", "bluetooth"] }
+cyw43-pio = { version = "0.10", features = ["defmt"] }
+trouble-host = { version = "0.8", features = ["default-packet-pool-mtu-128", "defmt"] }
+
+# Utilities
+heapless = "0.8"
+defmt = "1.0"
+defmt-rtt = "1.0"
+panic-probe = { version = "1.0", features = ["print-defmt"] }
+
+cortex-m = { version = "0.7" }
+cortex-m-rt = "0.7"
+static_cell = "2"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+
+[profile.release]
+debug = 2
+
+# Align cyw43 + embassy with the bt-hci-transport 0.1 model used by trouble-host 0.8.
+# Matches the trouble repo's rp-pico-2-w example.
+[patch.crates-io]
+cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }

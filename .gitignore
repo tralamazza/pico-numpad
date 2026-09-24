@@ -1,0 +1,9 @@
+# Rust build artifacts
+target/
+
+# Web app (added in a later phase)
+node_modules/
+web/dist/
+
+# Editor / OS cruft
+.DS_Store

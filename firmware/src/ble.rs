@@ -102,14 +102,40 @@ pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'stat
                     recovery::Action::ResetBonds => config_store::reset_hosts().await,
                 };
                 if restored {
-                    info!("host storage recovered; restarting");
-                    let _ = backlight.write(&[[0, 80, 0]; NUM_LEDS]).await;
+                    if matches!(action, recovery::Action::ResetBonds) {
+                        info!("host bonds cleared; every previously paired host must forget this device before it can pair again");
+                        flash_bonds_cleared(&mut backlight).await;
+                    } else {
+                        info!("host storage recovered; restarting");
+                        let _ = backlight.write(&[[0, 80, 0]; NUM_LEDS]).await;
+                    }
                     restart().await;
+                } else {
+                    // `restart()` diverges, so a success can never log a failure
+                    // underneath it.
+                    warn!("host recovery failed; release keys before trying again");
                 }
-                warn!("host recovery failed; release keys before trying again");
             }
         }
         Timer::after_millis(5).await;
+    }
+}
+
+/// Blue pulse before the reboot that follows a bond reset.
+///
+/// A host cannot be told its bond is gone: the central owns its bond store and a
+/// peripheral cannot invalidate a pairing it does not hold. All this device can
+/// do is refuse the reconnect, which the host sees as a generic authentication
+/// failure -- and macOS keeps the dead pairing and retries it silently. The
+/// device is therefore the only place this can be communicated, so say it as
+/// loudly as we can: every host that ever paired must "forget" this device
+/// before it can pair again.
+async fn flash_bonds_cleared(backlight: &mut Backlight<'static>) {
+    for _ in 0..4 {
+        let _ = backlight.write(&[[0, 0, 120]; NUM_LEDS]).await;
+        Timer::after_millis(280).await;
+        let _ = backlight.write(&[[0, 0, 0]; NUM_LEDS]).await;
+        Timer::after_millis(180).await;
     }
 }
 
@@ -164,16 +190,22 @@ async fn app_loop<C: Controller>(
     ui: &mut KeypadUi,
 ) {
     let mut adv_data = [0u8; 31];
-    let n = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteServiceUuids16(HID_SERVICE_UUID),
-            AdStructure::CompleteLocalName(host_slots::name(hosts.active).as_bytes()),
-        ],
-        &mut adv_data,
-    )
-    .expect("advertising data");
+    let mut adv_name_buf = [0u8; host_slots::MAX_ADV_NAME_LEN];
     loop {
+        // Rebuilt each iteration so the advertised name tracks the current bond
+        // state: after a pairing completes or a slot is cleared, the next
+        // advertisement says so instead of carrying a stale name until reboot.
+        let bonded = hosts.bonds[hosts.active as usize].is_some();
+        let adv_name = host_slots::adv_name(hosts.active, bonded, &mut adv_name_buf);
+        let n = AdStructure::encode_slice(
+            &[
+                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                AdStructure::CompleteServiceUuids16(HID_SERVICE_UUID),
+                AdStructure::CompleteLocalName(adv_name),
+            ],
+            &mut adv_data,
+        )
+        .expect("advertising data");
         let advertiser = match peripheral
             .advertise(
                 &AdvertisementParameters::default(),

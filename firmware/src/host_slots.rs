@@ -55,6 +55,50 @@ pub fn name(slot: u8) -> &'static str {
     }
 }
 
+/// Appended to the advertised name while a slot holds no bond.
+pub const PAIRING_SUFFIX: &str = "-pairing";
+
+/// Longest advertised local name that still fits the 31-byte legacy advertising
+/// payload alongside everything else we send: 3 (flags) + 4 (16-bit HID service
+/// UUID) + 2 (name AD header) = 9, leaving 22.
+pub const MAX_ADV_NAME_LEN: usize = 22;
+
+/// Write the advertised local name for `slot` into `buf` and return the filled
+/// prefix. An unbonded slot carries `PAIRING_SUFFIX`.
+///
+/// Why the bond state is in the name at all: a host cannot be *told* that its
+/// bond is gone. The central owns its bond store and BLE gives a peripheral no
+/// way to invalidate a pairing it does not hold. When a stale host-side bond
+/// tries to reconnect, all this device can do is refuse -- trouble-host
+/// disconnects with `AuthenticationFailure` -- and macOS in particular keeps the
+/// dead pairing and silently retries it forever. The advertised name is the only
+/// signal about bond state that reliably reaches a human on the host.
+///
+/// Only the advertised name varies. The GATT Generic Access device name stays the
+/// stable identity from `name()`.
+///
+/// # Panics
+///
+/// If `buf` is shorter than the name. Callers size it from `MAX_ADV_NAME_LEN`, so
+/// this is a programming error rather than a runtime condition.
+#[must_use]
+pub fn adv_name(slot: u8, bonded: bool, buf: &mut [u8]) -> &[u8] {
+    let base = name(slot).as_bytes();
+    let suffix: &[u8] = if bonded {
+        &[]
+    } else {
+        PAIRING_SUFFIX.as_bytes()
+    };
+    let len = base.len() + suffix.len();
+    assert!(
+        len <= buf.len(),
+        "advertising name buffer too small for slot {slot}"
+    );
+    buf[..base.len()].copy_from_slice(base);
+    buf[base.len()..len].copy_from_slice(suffix);
+    &buf[..len]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Select(u8),
@@ -387,5 +431,28 @@ mod tests {
             menu_colors([true, false, true], 0, Menu::Holding(1), 400)[1],
             [100, 40, 0]
         );
+    }
+
+    #[test]
+    fn unbonded_slots_advertise_that_they_need_pairing() {
+        let mut buf = [0u8; MAX_ADV_NAME_LEN];
+        assert_eq!(adv_name(0, true, &mut buf), &b"pico-numpad"[..]);
+        assert_eq!(adv_name(1, true, &mut buf), &b"pico-numpad-2"[..]);
+        assert_eq!(adv_name(2, false, &mut buf), &b"pico-numpad-3-pairing"[..]);
+        assert_eq!(adv_name(0, false, &mut buf), &b"pico-numpad-pairing"[..]);
+    }
+
+    #[test]
+    fn advertised_names_fit_the_advertising_payload() {
+        let mut buf = [0u8; MAX_ADV_NAME_LEN];
+        for slot in 0..SLOT_COUNT as u8 {
+            for bonded in [true, false] {
+                let len = adv_name(slot, bonded, &mut buf).len();
+                assert!(
+                    len <= MAX_ADV_NAME_LEN,
+                    "slot {slot} bonded={bonded} advertises {len} bytes, limit is {MAX_ADV_NAME_LEN}"
+                );
+            }
+        }
     }
 }

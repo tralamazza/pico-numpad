@@ -93,10 +93,51 @@ three copies with matching SHA-256), then overwrote the 8 KiB slot journal at
   active=1`, `connected on host slot 1`, `pairing complete: Encrypted`, and the
   region read back byte-identical to the backup.
 
-Still unverified on this item, because they require physical input: the `+`
-three-second retry gesture, the `1`+`2`+`3` five-second bond reset (including
-whether key/LED config survives the reset), menu responsiveness while in
-recovery, and the interrupted-reset case in the item above.
+- The `+` three-second retry and the `1`+`2`+`3` five-second bond reset were both
+  exercised on hardware. The retry re-read the journal, failed while it was still
+  corrupt, and left storage untouched. The bond reset wrote a fresh journal,
+  restarted, and came back `bonded=false`. Diffing flash against the
+  pre-corruption backup afterwards showed the **config sector byte-identical**,
+  so the reset preserved key/LED config as required.
+- The suspected "success logged as failure" in `ble.rs` -- the `warn!` sitting
+  outside the `if restored` block -- did **not** occur: `restart()` diverges, so
+  the failure line never follows a success. The block is now an explicit
+  `if`/`else` so that ordering is obvious to a reader rather than load-bearing on
+  a diverging call.
+
+Still unverified: the interrupted-reset case in the item above, which needs the
+power yanked mid-reset.
+
+## Tell the user when hosts hold stale bonds
+
+- [x] Advertise bond state: an unbonded slot advertises `pico-numpad-N-pairing`.
+  The GATT Generic Access name stays the stable identity, and the advertised name
+  is rebuilt on every advertisement so it tracks state within a session.
+- [x] Distinguish the recovery outcomes on the LED: retry success pulses green,
+  bond-reset success pulses blue, meaning "every host must now forget this
+  device".
+- [x] Document why the host cannot simply be told.
+
+A host cannot be told its bond is gone. The central owns its bond store and a
+peripheral cannot invalidate a pairing it does not hold; the numpad can only
+refuse the reconnect, which trouble-host reports as `AuthenticationFailure`.
+macOS keeps the dead pairing and retries it silently instead of prompting to
+re-pair. SMP offers no stale-bond reason code -- its reject reasons are all
+pairing-time failures -- and even the link layer's precise
+`LL_REJECT_IND_EXT` / `LL_ERROR_LTK_MISSING` leaves invalidation to host policy.
+The advertised name is therefore the only signal that reliably reaches a human.
+
+Observed on hardware after the bond reset, when the old host tried to resume:
+
+```
+69.451017 [INFO]  connected on host slot 1
+69.643217 [WARN]  [host] Long term key request reply failed, no long term key
+69.703039 [ERROR] [security manager] Encryption event error Connection Terminated By Local Host
+```
+
+Covered by `unbonded_slots_advertise_that_they_need_pairing` and
+`advertised_names_fit_the_advertising_payload` (22-byte name budget inside the
+31-byte legacy advertising packet).
 
 
 ## USB keyboard follow-up

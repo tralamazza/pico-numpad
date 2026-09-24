@@ -170,8 +170,32 @@ identity. Release all keys; held keys are ignored until released after startup.
 
 In the menu, **hold `1`, `2`, or `3` continuously for three seconds**. This clears
 only that slot's bond, selects it, and restarts into pairing mode. Release the key.
-On the laptop, forget the corresponding Bluetooth device and connect it again.
+On the laptop, **forget the corresponding Bluetooth device** and connect it again.
 The other two bonds and the key/LED configuration are unchanged.
+
+**Forgetting it on the laptop is not optional.** A host cannot be *told* its bond
+is gone: the central owns its bond store, and BLE gives a peripheral no way to
+invalidate a pairing it does not hold. When a stale host-side pairing reconnects,
+the numpad can only refuse, and the host sees a generic authentication failure
+(trouble-host disconnects with `AuthenticationFailure`). macOS keeps the dead
+pairing and retries it silently rather than prompting you to re-pair. SMP has no
+"your stored bond is stale" reason code either — its reject reasons are all
+pairing-time failures (confirm value, unsupported method, passkey, OOB, auth
+requirements) — so there is nothing more informative to send. The spec's precise
+answer, link-layer `LL_REJECT_IND_EXT` with `LL_ERROR_LTK_MISSING`, still leaves
+invalidation to the host's policy.
+
+To make that visible from the laptop rather than only from a serial log, **an
+unbonded slot says so in its advertised name**: `pico-numpad-2-pairing` instead of
+`pico-numpad-2`. If you see the `-pairing` suffix in the Bluetooth list, the
+device is waiting to pair and the older entry under the unsuffixed name is the
+stale one to forget. The suffix disappears once the slot holds a bond, and the
+name is rebuilt on every advertisement so it tracks the current state. The GATT
+Generic Access device name stays the stable identity; only the advertised name
+varies.
+
+A full bond reset (the recovery gesture below) clears all three slots at once, so
+it can mean forgetting and re-pairing up to three laptops.
 
 ### Storage-fault recovery
 
@@ -187,8 +211,11 @@ firmware starts a separate recovery mode instead of panicking:
   the physical **`1` + `2` + `3` keys together for five seconds**. This recovery-only
   gesture resets **all three bonds** and selects slot 1. It does not erase the
   keymap or LED configuration. It differs from the normal menu's single-slot clear.
-- Successful recovery briefly shows green and restarts. A failed retry/reset
-  stays in recovery; release all keys before another attempt.
+- A successful **retry** shows green and restarts. A successful **bond reset**
+  pulses **blue** four times before restarting, so the two outcomes are
+  distinguishable: blue means every previously paired host must now forget this
+  device. A failed retry/reset stays in recovery; release all keys before another
+  attempt.
 
 Recovery does not automatically erase storage. Explicit reset erases the legacy
 single-bond region before the new journal, preventing the old bond from being

@@ -63,13 +63,40 @@ brought the repo to its current state.
   (confirmed by user; exact hold timing not separately measured).
 - [x] Check cached-service behavior on the existing Mac pairing: numbers, `+`,
   and slot switching work without re-pairing.
-- [ ] On a disposable/backed-up device, inject invalid journal/read/write faults:
+- [~] On a disposable/backed-up device, inject invalid journal/read/write faults:
   confirm USB/menu responsiveness, retry, explicit reset, and failure handling.
-  **Take `just backup-storage` first** (64 KiB dump of the config + bond sectors;
-  restore with `just restore-storage`, which refuses to run without a backup).
+  **Boot-time failure handling verified** (see below). The retry and reset
+  gestures still need physical key presses.
 - [ ] Interrupt a recovery reset between flash operations and verify that legacy
-  bonds never reappear and key/LED configuration remains intact. Same backup
-  first; `just verify-storage` diffs the region against the captured file.
+  bonds never reappear and key/LED configuration remains intact. Needs a
+  physical power-yank mid-gesture; the storage backup below makes it safe to try.
+
+### Storage fault injection -- boot-time results (automated)
+
+Backed up the full 64 KiB region (`just backup-storage`, round-trip verified,
+three copies with matching SHA-256), then overwrote the 8 KiB slot journal at
+`0x103F3000` with random data and observed boot over RTT:
+
+```
+0.000960 [INFO ] config loaded from flash                    key/LED config survived
+0.001323 [ERROR] host storage recovery: host slot read failed  recovery, not panic
+0.286442 [DEBUG] SET_CONFIGURATION: configured               USB still enumerated
+```
+
+- No panic and no hard fault.
+- Zero cyw43/BLE log activity -- BLE was never started, so the device did not
+  come up with invented or empty bonds.
+- Key/LED config is in a separate sector and was unaffected.
+- A second boot with the journal still corrupt behaved identically, so failed
+  recovery is stable across reboots rather than degrading.
+- `just restore-storage` returned the device to normal: `host slots loaded;
+  active=1`, `connected on host slot 1`, `pairing complete: Encrypted`, and the
+  region read back byte-identical to the backup.
+
+Still unverified on this item, because they require physical input: the `+`
+three-second retry gesture, the `1`+`2`+`3` five-second bond reset (including
+whether key/LED config survives the reset), menu responsiveness while in
+recovery, and the interrupted-reset case in the item above.
 
 
 ## USB keyboard follow-up

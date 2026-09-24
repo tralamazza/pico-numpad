@@ -93,11 +93,15 @@ brought the repo to its current state.
   `just dupcheck 30` (macOS, needs Input Monitoring) captures HID reports from
   both transports and fails if the same key set arrives on both. **A PASS only
   counts if the summary lists both `USB` and `Bluetooth Low Energy` with non-zero
-  reports** -- a run that saw one transport alone is reported INCONCLUSIVE, not a
-  pass. The first live run on the bench captured USB only (38 reports, report ID
-  1) with no BLE line at all and still said PASS, which is exactly the false PASS
-  the harness used to produce. Confirm the BLE link is connected and reporting
-  before trusting a result.
+  reports** -- a run that saw one transport alone is INCONCLUSIVE, not a pass.
+  The first live run captured USB only (38 reports, report ID 1) with no BLE line.
+  That is very likely correct firmware behaviour, not a failure: `routing.rs`
+  sends `(keys, 0)` when USB is connected, so BLE gets nothing by design. The
+  host cannot distinguish that from a dead link, so verify across two sources --
+  confirm `connected on host slot N` in RTT, check USB-only typing, then unplug
+  USB and confirm reports appear on `Bluetooth Low Energy` (which proves the
+  harness can see BLE), then replug and confirm USB-only again. See the README
+  duplicate-input section for the full sequence.
 
 ## Build hygiene and tooling pass
 

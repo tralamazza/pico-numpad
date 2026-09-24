@@ -312,10 +312,27 @@ arrive.
 
 **A PASS requires both transports to have been observed.** The tool returns
 `INCONCLUSIVE`, never `PASS`, when: nothing was captured; only one transport
-produced reports (the other link looked fine but was silent, so a duplicate could
-not have been seen); or both transports reported but no key press was observed,
-only empty/release reports. Read the summary line before believing the verdict --
-if only `USB` is listed, the BLE side was never tested.
+produced reports; or both transports reported but no key press was observed,
+only empty/release reports.
+
+**How to actually run it.** With USB connected the firmware routes every key to
+USB and sends **none** to BLE (`routing.rs`: `Destination::Usb => (keys, 0)`), so
+a USB-only capture is the *expected correct* result -- but the host cannot tell
+that apart from a dead BLE link or a blind capture. Verify across two sources:
+
+1. Attach RTT and confirm `connected on host slot N`, so the BLE link is
+   genuinely up while you type.
+2. `just dupcheck 30` with USB plugged in, and type. Expect reports on `USB` only.
+3. **Unplug USB and type again.** Reports should now appear on
+   `Bluetooth Low Energy`. This is the step that proves the harness can see BLE
+   at all, which is what makes step 2's silence meaningful rather than
+   ambiguous.
+4. Replug USB and type: back to `USB` only, with no key on both.
+
+A `PASS` from the tool means both transports carried reports in the same window
+and none matched -- a state the firmware should never produce. Steps 2-4 are the
+real check; the tool's own verdict cannot reach PASS in the normal USB-priority
+state, by design.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain

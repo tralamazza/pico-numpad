@@ -89,8 +89,15 @@ func evaluate(_ events: [Event]) -> Verdict {
         return .inconclusive("no reports were captured at all")
     }
     if transports.count < 2 {
-        return .inconclusive("only \(transports.first!) was captured -- "
-            + "the other transport produced no reports, so a duplicate could not have been seen")
+        let seen = transports.first!
+        // With USB connected the firmware routes every key to USB and sends zero
+        // keys to BLE (routing.rs: Destination::Usb => (keys, 0)). So BLE
+        // silence is the CORRECT behaviour, not necessarily a capture failure --
+        // but the host cannot tell that apart from a dead link on its own.
+        let usbHint = "this is what USB priority looks like, but it is not proof of no duplication: confirm the BLE link is up in the RTT log ('connected on host slot N'), then unplug USB and type -- reports should then appear on Bluetooth Low Energy, which proves this tool can see BLE at all"
+        let bleHint = "confirm the USB link is connected and enumerated"
+        let hint = seen == "USB" ? usbHint : bleHint
+        return .inconclusive("only \(seen) was captured -- \(hint)")
     }
     let presses = events.filter { !isRelease($0) }
     if presses.isEmpty {

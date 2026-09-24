@@ -62,6 +62,27 @@ only that slot's bond, selects it, and restarts into pairing mode. Release the k
 On the laptop, forget the corresponding Bluetooth device and connect it again.
 The other two bonds and the key/LED configuration are unchanged.
 
+### Storage-fault recovery
+
+If the saved host journal cannot be read or has an unsupported format, the
+firmware starts a separate recovery mode instead of panicking:
+
+- The whole keypad pulses **red**, or amber while keys are pressed.
+- BLE stays off; USB configuration remains available, even if the radio has not
+  been initialised. No guessed/empty pairing record is used.
+- Release all keys, then **hold `+` for three seconds** to retry loading the
+  existing data. This does not request a bond reset.
+- To deliberately discard unreadable pairing data, release all keys, then hold
+  the physical **`1` + `2` + `3` keys together for five seconds**. This recovery-only
+  gesture resets **all three bonds** and selects slot 1. It does not erase the
+  keymap or LED configuration. It differs from the normal menu's single-slot clear.
+- Successful recovery briefly shows green and restarts. A failed retry/reset
+  stays in recovery; release all keys before another attempt.
+
+Recovery does not automatically erase storage. Explicit reset erases the legacy
+single-bond region before the new journal, preventing the old bond from being
+imported again if power is interrupted between those operations.
+
 The web configurator's reset button resets key/LED settings, not Bluetooth slots.
 Power-cycling does not clear bonds. Avoid chip-wide erase if you want to keep them.
 
@@ -71,6 +92,20 @@ Press another key in the menu to cancel, or leave the menu idle for ten seconds.
 Menu keys are not sent to the laptop. A **short `+` tap** still emits that key's
 configured usage, but on release; holding `+` alone is reserved for the menu.
 Pressing `+` together with another key before entering the menu types normally.
+
+All physical keys are independently debounced for 20 ms before typing or menu
+handling. Disabled mappings do not consume HID report entries, and duplicate
+mappings share one entry until all physical keys mapped to that usage are released.
+
+### HID compatibility / upgrading
+
+The keyboard supports **Report Protocol Mode only** and no longer exposes the
+optional Protocol Mode characteristic for unsupported boot-mode switching.
+Notifications remain encrypted eight-byte keyboard reports without an ID prefix.
+Removing the characteristic changes GATT handles for the subsequent Device
+Information service. If an already paired laptop uses stale cached services after
+this update, clear its slot using the normal host menu, forget the matching
+Bluetooth device on that laptop, and pair it again. Other slots can remain paired.
 
 If saving a slot action fails, the LEDs flash red and the old selection/bonds
 remain in use; the Pico does not reboot into unsaved state.
@@ -82,7 +117,7 @@ All storage lies in the reserved top 64 KiB of the 4 MiB flash:
 | Flash offset | Use |
 | --- | --- |
 | `0x3f0000..0x3f1000` | Key/LED configuration |
-| `0x3f1000..0x3f3000` | Legacy single bond (read only during migration) |
+| `0x3f1000..0x3f3000` | Legacy single bond (migration source; erased by explicit recovery reset) |
 | `0x3f3000..0x3f5000` | Versioned three-slot journal and selected slot |
 
 The entire slot record is saved together using `sequential-storage`. Migration
@@ -93,33 +128,40 @@ Downgrading to the old firmware will still use the old single-bond region.
 ## Lint and tests
 
 From the repository root, `just check` runs everything that can be verified
-without hardware: `cargo fmt --check`, clippy, and the unit tests.
+without hardware in the current gate: `cargo fmt --check`, clippy, and the unit tests.
 
 ```sh
 just check          # fmt-check + clippy + unit tests
-just clippy         # firmware clippy (embedded target) + standalone modules
+just lint           # firmware clippy (embedded target) + standalone modules
 just test           # unit tests for the hardware-free logic
 ```
 
 Clippy levels are configured in `Cargo.toml` (`[lints.rust] unsafe_code = "forbid"`,
 `[lints.clippy] all = "deny", pedantic = "deny"`), so a plain `cargo clippy`
-fails on any warning. Cast lints are not blanket-allowed: the two modules that
+fails on enabled Clippy all/pedantic lints. Cast lints are not blanket-allowed: the two modules that
 narrow deliberately (`config_store.rs` flash offsets, `host_slots.rs` slot ids)
 carry a scoped `#![allow(clippy::cast_possible_truncation)]` with the reason.
 
-The key controls and report builder are hardware-free and are compiled directly
-by `just test` (equivalently, from `firmware/`):
+The key controls, report builder, debouncer, and recovery gestures are hardware-free
+and are compiled directly by `just test` (equivalently, from `firmware/`):
 
 ```sh
 rustc --edition=2021 --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests
 /tmp/pico-numpad-slot-tests
 rustc --edition=2021 --test src/hid.rs -o /tmp/pico-numpad-hid-tests
 /tmp/pico-numpad-hid-tests
+rustc --edition=2021 --test src/debounce.rs -o /tmp/pico-numpad-debounce-tests
+/tmp/pico-numpad-debounce-tests
+rustc --edition=2021 --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests
+/tmp/pico-numpad-recovery-tests
 ```
 
-Those two files are linted through `clippy-driver` with the same levels as the
+Those four files are linted through `clippy-driver` with the same levels as the
 crate, because a direct `rustc` invocation does not read `Cargo.toml`.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain
 green and reconnect; verify normal numeric keys, short `+`, and menu cancellation.
+Recovery fault injection (invalid journal, read/write failure, and interrupted
+reset) still requires a disposable test device or a backed-up flash image; the
+host tests exercise gesture logic, not actual flash failure behavior.

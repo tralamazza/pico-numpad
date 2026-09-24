@@ -193,3 +193,28 @@ pub async fn save_hosts(hosts: &HostSlots) -> bool {
         }
     }
 }
+
+/// Explicit recovery reset only. This erases all host bonds, not key/LED config.
+/// Erase the legacy region first so an interrupted reset cannot migrate an old
+/// bond back into an empty journal. Failure leaves the caller in recovery mode.
+pub async fn reset_hosts() -> bool {
+    let Some(store) = STORE.try_get() else {
+        return false;
+    };
+    {
+        let mut flash = store.flash.lock().await;
+        if flash.erase(BOND_OFFSET, HOSTS_OFFSET).await.is_err() {
+            warn!("legacy bond reset failed");
+            return false;
+        }
+        if flash
+            .erase(HOSTS_OFFSET, HOSTS_OFFSET + HOSTS_LEN)
+            .await
+            .is_err()
+        {
+            warn!("host journal reset failed");
+            return false;
+        }
+    }
+    save_hosts(&HostSlots::from_legacy(None)).await
+}

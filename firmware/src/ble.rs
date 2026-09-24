@@ -1,6 +1,6 @@
 //! BLE HOGP (HID over GATT) peripheral.
 //!
-//! Exposes the Human Interface Device service (0x1812) with a single boot-keyboard
+//! Exposes the Human Interface Device service (0x1812) with a single report-protocol keyboard
 //! input report, plus a minimal Device Information service (0x180A) carrying the
 //! `PnP` ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
 
@@ -20,6 +20,7 @@ use crate::config_store::{self, HostSlots};
 use crate::hid::{build_report, REPORT_LEN, REPORT_MAP};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::Keypad;
+use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
 #[allow(dead_code)]
@@ -36,7 +37,7 @@ struct HidService {
     #[characteristic(uuid = characteristic::HID_INFORMATION, read, value = [0x11u8, 0x01, 0x00, 0x02], permissions(encrypted))]
     info: [u8; 4],
 
-    /// Report Map: boot-keyboard descriptor.
+    /// Report Map: report-protocol keyboard descriptor; boot mode is not exposed.
     #[characteristic(uuid = characteristic::REPORT_MAP, read, value = REPORT_MAP, permissions(encrypted))]
     report_map: &'static [u8],
 
@@ -48,10 +49,6 @@ struct HidService {
     #[characteristic(uuid = characteristic::REPORT, read, notify, value = [0u8; REPORT_LEN], permissions(encrypted))]
     #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x01u8, 0x01])]
     report: [u8; REPORT_LEN],
-
-    /// Protocol Mode: 1 = report protocol.
-    #[characteristic(uuid = characteristic::PROTOCOL_MODE, read, write_without_response, value = 1u8, permissions(encrypted))]
-    protocol_mode: u8,
 }
 
 /// Device Information service (0x180A).
@@ -70,6 +67,51 @@ struct DisService {
 
 /// Service UUID advertised so hosts can discover the HID service.
 const HID_SERVICE_UUID: &[[u8; 2]] = &[[0x12, 0x18]];
+
+/// Storage-fault mode: no BLE identity is advertised and no empty bond set is
+/// substituted. USB runs alongside this loop, independently of radio startup.
+pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'static>) -> ! {
+    let mut controls = recovery::Controls::default();
+    let mut last_color = None;
+    backlight.set_brightness(8);
+    loop {
+        if let Ok(keys) = keypad.read_pressed().await {
+            let now = Instant::now().as_millis();
+            let level = if (now / 400).is_multiple_of(2) {
+                15
+            } else {
+                80
+            };
+            let color = if keys == 0 {
+                [level, 0, 0]
+            } else {
+                [level, level / 3, 0]
+            };
+            if last_color != Some(color) && backlight.write(&[color; NUM_LEDS]).await.is_ok() {
+                last_color = Some(color);
+            }
+            if let Some(action) = controls.update(now, keys) {
+                let restored = match action {
+                    recovery::Action::Retry => match config_store::load_hosts().await {
+                        Ok(_) => true,
+                        Err(reason) => {
+                            warn!("host storage retry failed: {}", reason);
+                            false
+                        }
+                    },
+                    recovery::Action::ResetBonds => config_store::reset_hosts().await,
+                };
+                if restored {
+                    info!("host storage recovered; restarting");
+                    let _ = backlight.write(&[[0, 80, 0]; NUM_LEDS]).await;
+                    restart().await;
+                }
+                warn!("host recovery failed; release keys before trying again");
+            }
+        }
+        Timer::after_millis(5).await;
+    }
+}
 
 /// Bring up only the selected slot's identity and bond. Switching slots reboots
 /// the radio cleanly rather than retaining another host's security/CCCD state.
@@ -223,6 +265,10 @@ async fn apply_action(hosts: &HostSlots, action: Action, ui: &mut KeypadUi) {
         next.active + 1,
         next.bonds[next.active as usize].is_none()
     );
+    restart().await;
+}
+
+async fn restart() -> ! {
     // Let the old BLE link terminate before restarting the controller.
     Timer::after_millis(150).await;
     // RP2350 ROM normal reboot via watchdog, not BOOTSEL or a flash erase.

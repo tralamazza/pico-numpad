@@ -1,10 +1,10 @@
-//! HID report descriptor and report construction for the boot-keyboard profile.
+//! Report-protocol HID descriptor and keyboard report construction.
 //!
 //! The device exposes a single input report (Report ID 1) with the standard
 //! 8-byte keyboard layout: `[modifiers, reserved, key0..key5]`. Over GATT the
 //! Report ID is carried by the Report Reference descriptor, not the payload.
 
-/// Boot-keyboard HID report descriptor (Report ID 1).
+/// Report-protocol keyboard descriptor (Report ID 1).
 ///
 /// 8 modifier bits, 1 constant byte, 6 keycodes (usage page 0x07).
 pub const REPORT_MAP: &[u8] = &[
@@ -41,7 +41,7 @@ pub const REPORT_LEN: usize = 8;
 /// per-key HID usage map (index = physical key bit).
 ///
 /// Modifier usages (0xE0..=0xE7) set the modifier byte; all other usages fill
-/// the six keycode slots in order.
+/// the six keycode slots in order, ignoring disabled and duplicate mappings.
 #[must_use]
 pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
     let mut report = [0u8; REPORT_LEN];
@@ -52,7 +52,7 @@ pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
         }
         if (0xE0..=0xE7).contains(&usage) {
             report[0] |= 1 << (usage - 0xE0);
-        } else if slot < REPORT_LEN {
+        } else if usage != 0 && !report[2..slot].contains(&usage) && slot < REPORT_LEN {
             report[slot] = usage;
             slot += 1;
         }
@@ -76,5 +76,28 @@ mod tests {
         let mut keymap = [0; 16];
         keymap[..8].copy_from_slice(&[0xe1, 0xe4, 4, 5, 6, 7, 8, 9]);
         assert_eq!(build_report(0xff, &keymap), [0x12, 0, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn disabled_keys_do_not_hide_an_enabled_key() {
+        let mut keymap = [0; 16];
+        keymap[6] = 0x59;
+        assert_eq!(build_report(0x7f, &keymap), [0, 0, 0x59, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn duplicate_mappings_use_one_slot_and_remain_pressed_until_all_release() {
+        let mut keymap = [4; 16];
+        keymap[6] = 5;
+        assert_eq!(build_report(0x7f, &keymap), [0, 0, 4, 5, 0, 0, 0, 0]);
+        assert_eq!(build_report(3, &keymap), [0, 0, 4, 0, 0, 0, 0, 0]);
+        assert_eq!(build_report(2, &keymap), [0, 0, 4, 0, 0, 0, 0, 0]);
+        assert_eq!(build_report(0, &keymap), [0; 8]);
+    }
+
+    #[test]
+    fn modifiers_survive_full_report_and_duplicate_modifier_mappings() {
+        let keymap = [4, 5, 6, 7, 8, 9, 0xe1, 0xe1, 0xe4, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(build_report(0x1ff, &keymap), [0x12, 0, 4, 5, 6, 7, 8, 9]);
     }
 }

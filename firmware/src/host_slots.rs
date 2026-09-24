@@ -231,6 +231,10 @@ impl Controls {
 }
 
 #[cfg(test)]
+#[path = "debounce.rs"]
+mod debounce;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -267,6 +271,28 @@ mod tests {
         c.update(7_001, 0);
         c.update(7_002, SLOT_KEYS[0]);
         assert_eq!(c.update(7_100, 0).action, Some(Action::Select(0)));
+    }
+
+    #[test]
+    fn bounced_slot_press_still_clears_instead_of_selecting() {
+        let mut c = menu();
+        let mut d = debounce::Debouncer::default();
+        d.update(3_002, 0);
+        let key = SLOT_KEYS[1];
+        // Press, momentary open contact, then continued hold. Feed the actual
+        // debouncer output to the menu, as Keypad::read_pressed does on device.
+        for (time, raw) in [(4_000, key), (4_005, 0), (4_010, key), (4_029, key)] {
+            assert_eq!(c.update(time, d.update(time, raw)).action, None);
+        }
+        assert_eq!(c.update(4_030, d.update(4_030, key)).action, None);
+        // A further short bounce during the hold must not count as a release.
+        assert_eq!(c.update(4_100, d.update(4_100, 0)).action, None);
+        assert_eq!(c.update(4_105, d.update(4_105, key)).action, None);
+        assert_eq!(c.update(7_029, d.update(7_029, key)).action, None);
+        assert_eq!(
+            c.update(7_030, d.update(7_030, key)).action,
+            Some(Action::Clear(1))
+        );
     }
 
     #[test]

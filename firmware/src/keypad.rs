@@ -5,6 +5,9 @@
 //! bitwise NOT of the input registers.
 
 use embassy_rp::i2c::{Async, Error, I2c};
+use embassy_time::Instant;
+
+use crate::debounce::Debouncer;
 
 /// 7-bit I2C address of the TCA9555 on the base (address pins tied to GND).
 pub const ADDR: u8 = 0x20;
@@ -18,11 +21,15 @@ pub const NUM_KEYS: usize = 16;
 
 pub struct Keypad<'d> {
     i2c: I2c<'d, Async>,
+    debounce: Debouncer,
 }
 
 impl<'d> Keypad<'d> {
     pub fn new(i2c: I2c<'d, Async>) -> Self {
-        Self { i2c }
+        Self {
+            i2c,
+            debounce: Debouncer::default(),
+        }
     }
 
     /// Configure all 16 expander pins as inputs.
@@ -40,8 +47,9 @@ impl<'d> Keypad<'d> {
         Ok(u16::from(buf[0]) | (u16::from(buf[1]) << 8))
     }
 
-    /// Bitmask of pressed keys (bit set = pressed). Active-low inverted here.
+    /// Debounced pressed mask (bit set = pressed), shared by every input consumer.
     pub async fn read_pressed(&mut self) -> Result<u16, Error> {
-        Ok(!self.read_raw().await?)
+        let raw = !self.read_raw().await?;
+        Ok(self.debounce.update(Instant::now().as_millis(), raw))
     }
 }

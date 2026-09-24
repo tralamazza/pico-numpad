@@ -23,9 +23,11 @@ mod backlight;
 mod ble;
 mod config;
 mod config_store;
+mod debounce;
 mod hid;
 mod host_slots;
 mod keypad;
+mod recovery;
 mod usb;
 
 bind_interrupts!(struct Irqs {
@@ -73,7 +75,20 @@ async fn main(spawner: Spawner) {
         *config::CONFIG.lock().await = c;
     }
     config_store::init(flash);
-    let hosts = config_store::load_hosts().await.expect("host slot storage");
+    let hosts = match config_store::load_hosts().await {
+        Ok(hosts) => hosts,
+        Err(reason) => {
+            defmt::error!("host storage recovery: {}", reason);
+            // Recovery needs neither the radio nor a valid bond record. Keep
+            // USB configuration and physical recovery controls available.
+            join(
+                ble::recover(keypad, backlight),
+                usb::run_usb(UsbDriver::new(p.USB, Irqs)),
+            )
+            .await;
+            return;
+        }
+    };
 
     // --- CYW43 Bluetooth on PIO0 (PWR=GP23, DIO=GP24, CS=GP25, CLK=GP29) ---
     let pwr = Output::new(p.PIN_23, Level::Low);

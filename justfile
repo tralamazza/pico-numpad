@@ -7,7 +7,9 @@
 # hardware-free modules are also compiled standalone with clippy-driver/rustc,
 # which does not read Cargo.toml, so LINT_FLAGS mirrors those levels there.
 
-LINT_FLAGS := "-Dwarnings -Wclippy::all -Wclippy::pedantic"
+# -F unsafe_code mirrors [lints.rust] unsafe_code = "forbid" from Cargo.toml,
+# which a standalone clippy-driver invocation does not read.
+LINT_FLAGS := "-Dwarnings -F unsafe_code -Wclippy::all -Wclippy::pedantic"
 
 # Everything worth running before pushing.
 default: check

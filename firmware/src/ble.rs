@@ -206,6 +206,14 @@ async fn app_loop<C: Controller>(
             &mut adv_data,
         )
         .expect("advertising data");
+        // Everything lives inside the macro so a ship build at a higher log level
+        // compiles the whole thing away rather than leaving the decode behind.
+        debug!(
+            "advertising as \"{}\" (bonded={}, {} of 31 advertisement bytes)",
+            core::str::from_utf8(adv_name).unwrap_or("<not utf8>"),
+            bonded,
+            u8::try_from(n).unwrap_or(u8::MAX)
+        );
         let advertiser = match peripheral
             .advertise(
                 &AdvertisementParameters::default(),

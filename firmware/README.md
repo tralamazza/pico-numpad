@@ -43,9 +43,10 @@ just ship    # flash the quiet ship image over SWD
 
 The ship profile drops the `debug!` flood (cyw43 HCI `rx`/`tx`, embassy internals)
 but keeps `info` and above, so a shipped device still reports config load, active
-slot, BLE connect and pairing on RTT. Measured flash for this app: `error`
-708,200 / `warn` 717,364 / `info` 719,904 / `debug` 726,788 bytes. Adjust
-`LOG_SHIP` in the [`../justfile`](../justfile) if you want a different cut.
+slot, BLE connect and pairing on RTT. Measured flash for this app (text+data):
+`error` 668,196 / `warn` 677,344 / `info` 679,884 / `debug` 686,808 bytes, out
+of a 4032 K region. Adjust `LOG_SHIP` in the
+[`../justfile`](../justfile) if you want a different cut.
 
 Run Cargo commands from **`firmware/`**, so Cargo picks up its `.cargo/config.toml`
 with the embedded target and probe runner. Note that a bare Cargo invocation picks
@@ -235,6 +236,31 @@ writes the new journal before using it, leaving the old bond intact. Once a new
 record exists, clearing slot 1 cannot resurrect the legacy bond on next boot.
 Downgrading to the old firmware will still use the old single-bond region.
 
+### Back up before destructive storage tests
+
+The offsets above are relative to the flash base at `0x10000000`, so the whole
+reserved region is `0x103F0000..0x103F3000` in absolute terms. `just`
+recipes dump and restore all of it over SWD in one shot:
+
+```sh
+just backup-storage    # dump 64 KiB from 0x103F0000 to pico-numpad-config-backup.bin
+just verify-storage    # re-read the region and diff it against the file
+just restore-storage   # write the file back and verify (refuses if no backup exists)
+```
+
+The backup contains your **real pairing material**. It is gitignored; keep it off
+shared drives. `restore-storage` deliberately refuses to run when the backup file
+is missing, so you cannot restore over a state you never captured.
+
+Verified on hardware: a read → download → re-read round-trip of the whole 64 KiB
+came back byte-identical, and the device afterwards still reported
+`config loaded from flash` / `host slots loaded; active=1` and reconnected its
+encrypted slot-1 bond.
+
+Take this backup before running the journal-fault injection checks in
+[`../PLAN.md`](../PLAN.md). `probe-rs write` cannot be used for the restore -- it
+only accepts RAM addresses.
+
 ## Lint and tests
 
 From the repository root, `just check` runs everything that can be verified
@@ -260,6 +286,30 @@ coverage includes USB priority, held-key handover, and disconnected-input handli
 `just clippy-host` lints these modules through `clippy-driver`, explicitly passing
 the lint levels because standalone compilation does not read `Cargo.toml`.
 Use the recipes in [`../justfile`](../justfile) as the authoritative command list.
+
+CI runs `just check` plus a ship build on every push and pull request
+([`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)), using the pinned
+toolchain. It cannot cover the flash path, so the hardware checks in
+[`../PLAN.md`](../PLAN.md) are still on you.
+
+### Duplicate-input check (macOS)
+
+`tools/dupcheck.swift` taps the HID input reports of every pico-numpad device on
+the host (`vendor 0x2e8a`) through `IOHIDManager`, tags each report with its
+transport, and fails if the same key set arrives on **both** USB and BLE. Reports
+are compared by key signature rather than raw bytes, so a differing report ID or
+report length between the two transports cannot hide a real duplicate.
+
+```sh
+just dupcheck-selftest   # verify the detection logic on synthetic events
+just dupcheck 30         # capture 30s; type each key once, then hold a few
+```
+
+`dupcheck-selftest` is portable to any machine with `swiftc` and needs no device.
+`dupcheck` needs macOS **Input Monitoring** permission for your terminal app
+(System Settings > Privacy & Security > Input Monitoring); without it no reports
+arrive, and the tool reports `INCONCLUSIVE` rather than passing. A run that
+captures nothing is never a pass.
 
 Hardware checks: migrate/reconnect slot 1; pair slots 2 and 3; switch between
 laptops; power-cycle and reconnect; clear one slot and verify the others remain

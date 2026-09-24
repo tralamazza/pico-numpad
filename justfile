@@ -56,8 +56,9 @@ test:
 # image. Set here (not only in .cargo/config.toml) so the two profiles stay apart
 # and a bare `cargo` call still defaults to full tracing.
 #
-# Measured flash (text+data) for this app, which has 26 warn!/17 info!/1 error!:
-#   error 708,200   warn 717,364   info 719,904   debug 726,788
+# Measured flash for this app (text+data; bss is RAM and is 39,860 at every
+# level), with its 26 warn!/17 info!/1 error!:
+#   error 668,196   warn 677,344   info 679,884   debug 686,808
 # `info` is the ship level: it keeps the app's state transitions (config loaded,
 # slot active, connected, pairing complete) for 2.5 KiB over `warn`, and still
 # drops the cyw43 HCI rx/tx and embassy debug spam that costs ~7 KiB at `debug`.
@@ -80,5 +81,62 @@ flash:
 ship:
     cd firmware && DEFMT_LOG={{LOG_SHIP}} cargo run --release -- --verify
 
+# Report the ship image size (uses arm-none-eabi-size when present; Apple's
+# /usr/bin/size cannot read ARM ELF).
+size:
+    @BIN=firmware/target/thumbv8m.main-none-eabihf/release/pico-numpad; \
+    if command -v arm-none-eabi-size >/dev/null 2>&1; then SZ=arm-none-eabi-size; else SZ=size; fi; \
+    "$SZ" "$BIN" | awk 'NR==2 {printf "ship image: %d bytes flash (text+data) of the 4032K region, %d bytes ram (bss)\n", $1+$2, $3}'
+
+# --------------------------------------------------------------------------
+# Storage safety net.
+#
+# The key/LED config sector and the BLE bond sector live in the top 64 KiB of
+# flash (config_store.rs: config at 0x103F0000, bond sector at 0x103F1000).
+# Take a backup before any destructive storage-fault test; restore brings both
+# sectors back together. Round-trip verified byte-identical on the RP2350.
+#
+# The backup contains your real pairing material -- it is gitignored, keep it off
+# shared drives.
+BACKUP := "pico-numpad-config-backup.bin"
+STORAGE_BASE := "0x103F0000"
+# 16384 x 32-bit words = 64 KiB, covering the config sector and the bond sector.
+STORAGE_WORDS := "16384"
+
+# Back up the config + BLE bond sectors over SWD (read-only).
+backup-storage:
+    probe-rs read --chip RP235x -f binary -o {{BACKUP}} b32 {{STORAGE_BASE}} {{STORAGE_WORDS}}
+    @echo "backed up 64 KiB from {{STORAGE_BASE}} to {{BACKUP}}"
+
+# Re-read the region and diff it against the backup file.
+verify-storage:
+    @test -f {{BACKUP}} || { echo "no {{BACKUP}}; run 'just backup-storage' first"; exit 1; }
+    probe-rs read --chip RP235x -f binary -o /tmp/pico-numpad-reread.bin b32 {{STORAGE_BASE}} {{STORAGE_WORDS}}
+    cmp {{BACKUP}} /tmp/pico-numpad-reread.bin && echo "round-trip: byte-identical"
+
+# Restore the config + bond sectors from the backup, then verify the write.
+restore-storage:
+    @test -f {{BACKUP}} || { echo "no {{BACKUP}}; refusing to restore. Run 'just backup-storage' first."; exit 1; }
+    probe-rs download --chip RP235x --binary-format bin --base-address {{STORAGE_BASE}} --verify {{BACKUP}}
+    @echo "restored {{BACKUP}} to {{STORAGE_BASE}}; power-cycle and check RTT for 'config loaded from flash'"
+
+# --------------------------------------------------------------------------
+# Host-side duplicate-input check (macOS only; needs Input Monitoring permission).
+# Captures HID reports from every pico-numpad device on this host and fails if the
+# same key set arrives on both USB and BLE. See tools/dupcheck.swift.
+
+# Verify the duplicate-detection logic on synthetic events (no device needed).
+dupcheck-selftest:
+    swiftc -O tools/dupcheck.swift -o /tmp/pico-numpad-dupcheck
+    /tmp/pico-numpad-dupcheck --selftest
+
+# Capture from the connected device(s). Usage: just dupcheck 30
+dupcheck *args:
+    swiftc -O tools/dupcheck.swift -o /tmp/pico-numpad-dupcheck
+    /tmp/pico-numpad-dupcheck {{args}}
+
 # fmt-check + clippy + tests.
 check: fmt-check lint test
+
+# Everything portable plus the macOS-only host harness selftest.
+check-macos: check dupcheck-selftest

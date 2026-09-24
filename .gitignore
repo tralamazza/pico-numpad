@@ -7,3 +7,6 @@ web/dist/
 
 # Editor / OS cruft
 .DS_Store
+
+# Real pairing material dumped from the device by `just backup-storage`.
+pico-numpad-config-backup.bin

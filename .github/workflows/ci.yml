@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: Lint and host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler, the thumbv8m target and the
+      # rustfmt/clippy components, and rustup installs them on first use. The pin
+      # is load-bearing (git-pinned embassy + a proc-macro-error2 future
+      # incompatibility), so CI deliberately does not override it.
+      - name: Show the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      # fmt-check + firmware clippy (embedded target) + clippy on the standalone
+      # hardware-free modules + their unit tests. This is the same gate the
+      # README tells contributors to run before pushing.
+      - name: just check
+        run: just check
+
+      # Build the ship image and report its size so a jump in flash usage shows up
+      # in the log rather than at the bench.
+      - name: just build
+        run: just build
+
+      - name: Report image size
+        run: just size

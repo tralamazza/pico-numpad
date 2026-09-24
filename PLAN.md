@@ -1,6 +1,9 @@
 # Firmware review fixes
 
 Baseline: `893b405` (host slots and Clippy gate). Keep all work Clippy-clean.
+This document is cumulative: the sections below record the original review fixes,
+then the USB keyboard follow-up, then the build-hygiene and tooling pass that
+brought the repo to its current state.
 
 ## Scope and acceptance criteria
 
@@ -62,8 +65,11 @@ Baseline: `893b405` (host slots and Clippy gate). Keep all work Clippy-clean.
   and slot switching work without re-pairing.
 - [ ] On a disposable/backed-up device, inject invalid journal/read/write faults:
   confirm USB/menu responsiveness, retry, explicit reset, and failure handling.
+  **Take `just backup-storage` first** (64 KiB dump of the config + bond sectors;
+  restore with `just restore-storage`, which refuses to run without a backup).
 - [ ] Interrupt a recovery reset between flash operations and verify that legacy
-  bonds never reappear and key/LED configuration remains intact.
+  bonds never reappear and key/LED configuration remains intact. Same backup
+  first; `just verify-storage` diffs the region against the captured file.
 
 
 ## USB keyboard follow-up
@@ -84,3 +90,98 @@ Baseline: `893b405` (host slots and Clippy gate). Keep all work Clippy-clean.
 - [x] Physically verify USB typing and BLE fallback after USB unplug
   (confirmed by user).
 - [ ] Explicitly verify no duplicate input with USB and BLE both connected.
+  `just dupcheck 30` (macOS, needs Input Monitoring) captures HID reports from
+  both transports and fails if the same key set arrives on both; the detection
+  logic itself is covered by `just dupcheck-selftest`, which passes. The live
+  capture still needs a person to type the keys.
+
+## Build hygiene and tooling pass
+
+Follow-on work after the review items above. All of it keeps `just check` green.
+
+### Dependency hygiene
+
+- Added `embassy-futures` to `[patch.crates-io]`. The embassy crates depend on it
+  by path inside the embassy repo, so the crates.io direct dep was linking a
+  second copy (`cargo tree -d` showed `embassy-futures 0.1.2` twice). One copy now.
+- Dropped the `critical-section` feature from `portable-atomic`. `embassy-rp`
+  already provides the critical-section impl and the `CriticalSectionRawMutex`
+  uses come from `embassy-sync`; Cargo feature unification was switching a second
+  provider on for every `portable-atomic` consumer (`static_cell`, `usb-device`).
+- Removed `heapless` (no references in `src/` or `build.rs`) and
+  `executor-interrupt` from `embassy-executor` (nothing spawns at interrupt
+  priority).
+- Verified on hardware after each change: boots, config loads, BLE slot 1
+  connects and encrypts, USB configures, no faults.
+
+### Log-level split
+
+`DEFMT_LOG=debug` in `.cargo/config.toml` had been applying to every profile, so
+the shipped image carried the whole embassy/cyw43 debug flood. Cargo cannot scope
+env vars to a profile, so the split is by profile: `release` (ship, `info`) and
+`diagnostic` (bench, `debug`), in separate target dirs so switching levels does
+not recompile the dependency tree. Recipes: `just build` / `just diag` /
+`just flash` / `just ship`.
+
+Measured flash (text+data, 4032 K region) at each level:
+
+| `DEFMT_LOG` | flash | note |
+| --- | --- | --- |
+| `error` | 668,196 | strips all 17 `info!` state transitions too |
+| `warn` | 677,344 | keeps failure paths only |
+| `info` | 679,884 | **ship** — keeps config load / slot / connect / pairing |
+| `debug` | 686,808 | bench — cyw43 HCI `rx`/`tx` and embassy internals |
+
+`info` was chosen over `warn` for 2,540 bytes because a shipped device that cannot
+report "connected on host slot 1" is hard to diagnose in the field.
+
+### Toolchain pin and lint gate
+
+- `rust-toolchain.toml` pins 1.98.1 plus the `thumbv8m.main-none-eabihf` target
+  and `rustfmt`/`clippy`, auto-installed by rustup. Load-bearing twice over: the
+  git-pinned embassy, and holding back the `proc-macro-error2 2.0.1` E0365
+  future-incompatibility (transitive via `pio-proc <- pio <- embassy-rp`), which
+  is at its latest published version with no upstream fix.
+- `just clippy-host` now passes `-F unsafe_code`, mirroring
+  `[lints.rust] unsafe_code = "forbid"` that a standalone `clippy-driver`
+  invocation does not read. Confirmed with a negative test: an `unsafe` block in a
+  host module is now caught by the gate.
+- `unsafe_code` kept as `forbid` rather than `deny`, deliberately: no scoped
+  escape hatch means any future `unsafe` has to change `Cargo.toml` visibly.
+
+### CI
+
+`.github/workflows/ci.yml` runs `just check` plus a ship build and image-size
+report on every push and pull request, on the pinned toolchain. It cannot cover
+the flash path, so the hardware checks above remain manual.
+
+### Storage safety net
+
+`just backup-storage` / `just verify-storage` / `just restore-storage` dump and
+restore the whole 64 KiB config + bond region (`0x103F0000`) over SWD. The
+backup is gitignored because it holds real pairing material, and `restore-storage`
+refuses to run when no backup exists. Round-trip verified on hardware: read →
+download → re-read came back byte-identical, and the device still loaded its
+config and reconnected its encrypted slot-1 bond afterwards. Note `probe-rs
+write` cannot do this restore; it only accepts RAM addresses.
+
+### Duplicate-input harness
+
+`tools/dupcheck.swift` taps HID input reports from every `vendor 0x2e8a` device
+via `IOHIDManager`, tags each by transport, and fails if the same key set
+arrives on both USB and BLE. Comparison is by key signature, not raw bytes, so a
+different report ID or length between the transports cannot mask a duplicate.
+`just dupcheck-selftest` verifies that logic against synthetic events (cross-
+transport duplicate, cross-report-ID duplicate, outside-window, different keys,
+one-transport-only, releases, empty capture) and passes. Live capture needs macOS
+Input Monitoring permission and a person to type, so the end-to-end check above
+is still open.
+
+### Gate status
+
+- `just check` / `just check-macos`: PASS (28 unit tests, clippy on the embedded
+  target and the five standalone host modules, dupcheck selftest).
+- `just build` ship image: 679,884 bytes flash, 39,860 bytes RAM.
+- `just flash` verified on the board after every change in this pass; last flash
+  verification 37.24 s, 0 errors, BLE encrypted.
+

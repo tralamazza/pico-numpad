@@ -63,16 +63,15 @@ test:
 # image. Set here (not only in .cargo/config.toml) so the two profiles stay apart
 # and a bare `cargo` call still defaults to full tracing.
 #
-# Measured flash for this app (text+data; bss is RAM and is ~39.9 KiB at every
-# level), with its 26 warn!/18 info!/1 error!:
-#   error 668,196   warn 677,344   info 679,884   debug 686,808
-# Those absolutes pre-date fat LTO. The relative deltas still hold -- `info` is
-# 2.5 KiB over `warn`, and `debug` adds ~7 KiB of cyw43 HCI rx/tx and embassy
-# spam on top. Current ship image at `info` with fat LTO: 642,484 bytes
-# (`just size` is the authority; these figures drift with every code change).
-# `info` is the ship level: it keeps the app's state transitions (config loaded,
-# slot active, connected, pairing complete) for that 2.5 KiB over `warn`, and
-# still drops the debug spam.
+# `info` is the ship level: it keeps the state transitions you need to diagnose a
+# device in the field (config loaded, slot active, connected, pairing complete)
+# for a small flash premium over `warn`, and still drops the cyw43 HCI rx/tx and
+# embassy internals that `debug` pulls in.
+#
+# No byte figures here on purpose. They move with every code change and go stale
+# the moment they are written down. `just size` gives the current ship figure, and
+# `DEFMT_LOG=warn just build && just size` (repeat per level) re-measures the
+# trade-off whenever it needs revisiting.
 LOG_SHIP := "info"
 LOG_BENCH := "debug"
 
@@ -132,11 +131,12 @@ serve:
 #
 # The whole reserved top 64 KiB of flash is dumped in one shot: config at
 # 0x103F0000 (4 KiB), the legacy single bond at 0x103F1000 (8 KiB), and the
-# three-slot journal at 0x103F3000 (8 KiB), plus 44 KiB of slack. All of it is
-# captured rather than just the ~600 bytes actually in use, so a restore cannot
-# miss a region someone forgot to name. Offsets derive from config_store.rs; see
-# the Storage section in firmware/README.md for the derivation and the invariant
-# that keeps linked code from ever reaching 0x103F0000.
+# three-slot journal at 0x103F3000 (8 KiB), plus the slack between them. All of
+# it is captured rather than just the bytes the live records happen to occupy, so
+# a restore cannot miss a region someone forgot to name. Offsets derive from
+# config_store.rs; see the Storage section in firmware/README.md for the
+# derivation and the invariant that keeps linked code from ever reaching
+# 0x103F0000.
 #
 # Take a backup before any destructive storage test. Round-trip verified
 # byte-identical on the RP2350.

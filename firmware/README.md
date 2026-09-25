@@ -43,12 +43,9 @@ just ship    # flash the quiet ship image over SWD
 
 The ship profile drops the `debug!` flood (cyw43 HCI `rx`/`tx`, embassy internals)
 but keeps `info` and above, so a shipped device still reports config load, active
-slot, BLE connect and pairing on RTT. Measured flash for this app (text+data,
-pre-fat-LTO, so the deltas are what to trust):
-`error` 668,196 / `warn` 677,344 / `info` 679,884 / `debug` 686,808 bytes.
-The current ship image at `info` with fat LTO is 642,484 bytes out of a 4032 K
-region. Adjust `LOG_SHIP` in the
-[`../justfile`](../justfile) if you want a different cut.
+slot, BLE connect and pairing on RTT. Adjust `LOG_SHIP` in the
+[`../justfile`](../justfile) if you want a different cut. `just size` reports the
+current footprint; no figures are quoted here because they move with every build.
 
 Run Cargo commands from **`firmware/`**, so Cargo picks up its `.cargo/config.toml`
 with the embedded target and probe runner. Note that a bare Cargo invocation picks
@@ -344,15 +341,17 @@ latency -- degraded, but obvious, and visible as an all-`Timeout` trace. The
 `Wake` enum exists because a dead INT line would otherwise hide behind the timer
 at ten times the intended idle cost.
 
-### Measured
+### What it buys
 
 | | Before | After |
 | --- | --- | --- |
-| Idle CPU wakeups / I2C reads | 200/s (5 ms poll) | **1.02/s** |
-| Key latency | up to 5 ms | interrupt-driven |
+| Idle I2C reads | one per poll interval | only on interrupt, plus the safety-net poll |
+| Key latency | up to one poll interval | interrupt latency |
 
-Idle measured over a 43 s window: 44 wakes, all `Timeout`. During typing,
-`Interrupt` wakes arrive paired with each press and release.
+Re-measure with `tools/capture.sh` rather than trusting a figure left here: idle
+should be mostly `Timeout` wakes at `SAFETY_POLL_MS`, with `Interrupt` wakes
+paired to each press and release. A dead INT line shows up as an all-`Timeout`
+trace.
 
 Not measured: absolute current. There is no meter on the bench, so the wake-rate
 reduction is stated and no milliamp figure is implied.
@@ -390,11 +389,13 @@ resume-on-unplug path that can fail. Not implemented.
 
 ### What is actually left
 
-The connected-BLE idle path. The negotiated link runs at interval 15 ms with
-slave latency 22, so the radio wakes about every 345 ms while idle. Requesting a
-longer interval when nothing is happening would stretch that, at the cost of
-latency on the first keypress after idle. Whether a host grants it is another
-question -- macOS has its own preferences about connection parameters.
+The connected-BLE idle path. The host grants the connection parameters, so the
+idle wake interval is whatever the host agreed to rather than something this
+firmware picks -- capture the HCI trace to read the interval and slave latency a
+given host actually grants. Requesting a longer interval when nothing is happening
+would stretch that wake rate, at the cost of latency on the first keypress after
+idle. Whether a host grants it is another question; macOS has its own preferences
+about connection parameters.
 
 ## Storage
 
@@ -426,19 +427,17 @@ pairing material.
 
 **Never raise that `LENGTH` to 4096K.** The linker would then place code over the
 storage region and flashing would overwrite the config, the legacy bond, and the
-slot journal. The 64 KiB reservation is a deliberate cost: the ship image is
-~627 KiB against a 4032 KiB budget, so there is no pressure to reclaim it.
+slot journal. The 64 KiB reservation is a deliberate cost against a budget with
+room to spare (`just size` for the current figure), so there is no pressure to
+reclaim it.
 
 ### What actually gets written
 
-Dumping a live backup and scanning for non-erased (non-`0xFF`) bytes confirms the
-firmware writes nothing outside the declared regions:
-
-```
-0x103F0000..0x103F0020     32 bytes   config
-0x103F1000..0x103F1074    115 bytes   legacy single bond
-0x103F3000..0x103F31C4    452 bytes   slot journal
-```
+Dumping a live backup (`just backup-storage`) and scanning it for non-erased
+(non-`0xFF`) bytes confirms the firmware writes nothing outside the three
+declared regions above. The scan is the check and the dump is one command away,
+so no snapshot of it is kept here — the high-water marks move every time a
+record is appended, and a frozen listing would only tell you when it was taken.
 
 The regions look sparse because `sequential-storage` appends instead of rewriting
 in place; the free space absorbs wear and lets records grow.
@@ -456,8 +455,8 @@ reads the old single-bond region.
 The relative offsets above are from the flash base at `0x10000000`; the whole
 reserved region is `0x103F0000..0x10400000` in absolute terms. The `just` recipes
 dump and restore **all 64 KiB** in one shot over SWD — the entire reservation, not
-just the ~600 bytes in use, so a restore cannot miss a region someone forgot to
-name:
+just the bytes the current records happen to occupy, so a restore cannot miss a
+region someone forgot to name:
 
 ```sh
 just backup-storage    # dump 64 KiB from 0x103F0000 -> pico-numpad-config-backup.bin

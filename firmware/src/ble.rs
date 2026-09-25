@@ -68,6 +68,28 @@ struct DisService {
 /// Service UUID advertised so hosts can discover the HID service.
 const HID_SERVICE_UUID: &[[u8; 2]] = &[[0x12, 0x18]];
 
+/// Advertisement interval while a slot still needs pairing, or in the window right
+/// after a link drops. Matches the trouble-host default.
+const ADV_INTERVAL_FAST: Duration = Duration::from_millis(160);
+
+/// Advertisement interval for a bonded slot that has been sitting disconnected.
+/// Five times slower than `ADV_INTERVAL_FAST`, at the cost of a second or two of
+/// extra reconnect latency.
+const ADV_INTERVAL_IDLE: Duration = Duration::from_millis(800);
+
+/// How many advertisement cycles keep the fast interval before settling. Each
+/// cycle is roughly a second, so this is about half a minute of easy discovery
+/// after boot or a drop.
+/// Advertisement interval for the current bond state and idle streak.
+#[must_use]
+fn adv_interval(bonded: bool, fast_cycles: u32) -> Duration {
+    if host_slots::advertise_fast(bonded, fast_cycles) {
+        ADV_INTERVAL_FAST
+    } else {
+        ADV_INTERVAL_IDLE
+    }
+}
+
 /// Storage-fault mode: no BLE identity is advertised and no empty bond set is
 /// substituted. USB runs alongside this loop, independently of radio startup.
 pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'static>) -> ! {
@@ -193,6 +215,10 @@ async fn app_loop<C: Controller>(
 ) {
     let mut adv_data = [0u8; 31];
     let mut adv_name_buf = [0u8; host_slots::MAX_ADV_NAME_LEN];
+    // Advertisement cycles spent at the fast interval. Reset on every accepted
+    // connection so a pad that just dropped its link stays easy to find for a
+    // while before settling down.
+    let mut fast_cycles = 0u32;
     loop {
         // Rebuilt each iteration so the advertised name tracks the current bond
         // state: after a pairing completes or a slot is cleared, the next
@@ -208,17 +234,25 @@ async fn app_loop<C: Controller>(
             &mut adv_data,
         )
         .expect("advertising data");
+        let interval = adv_interval(bonded, fast_cycles);
+        fast_cycles = fast_cycles.saturating_add(1);
+        let params = AdvertisementParameters {
+            interval_min: interval,
+            interval_max: interval,
+            ..AdvertisementParameters::default()
+        };
         // Everything lives inside the macro so a ship build at a higher log level
         // compiles the whole thing away rather than leaving the decode behind.
         debug!(
-            "advertising as \"{}\" (bonded={}, {} of 31 advertisement bytes)",
+            "advertising as \"{}\" (bonded={}, {} ms interval, {} of 31 advertisement bytes)",
             core::str::from_utf8(adv_name).unwrap_or("<not utf8>"),
             bonded,
+            interval.as_millis(),
             u8::try_from(n).unwrap_or(u8::MAX)
         );
         let advertiser = match peripheral
             .advertise(
-                &AdvertisementParameters::default(),
+                &params,
                 Advertisement::ConnectableScannableUndirected {
                     adv_data: &adv_data[..n],
                     scan_data: &[],
@@ -248,6 +282,9 @@ async fn app_loop<C: Controller>(
         .await
         {
             Either3::First(Ok(conn)) => {
+                // A link came up, so the next time we are disconnected the host is
+                // likely still around and should find us quickly.
+                fast_cycles = 0;
                 if let Some(bond) = &hosts.bonds[hosts.active as usize] {
                     if !bond.identity.match_identity(&conn.peer_identity()) {
                         warn!("rejecting peer outside active host slot");

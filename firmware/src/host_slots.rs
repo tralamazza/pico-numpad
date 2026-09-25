@@ -21,6 +21,22 @@ const TAP_HOLD_MS: u64 = 30;
 /// outright when nobody is using the pad is the biggest power lever available.
 pub const LED_IDLE_OFF_MS: u64 = 60_000;
 
+/// Advertisement cycles a bonded slot keeps the fast interval before settling.
+/// Each cycle is roughly a second, so about half a minute of easy discovery
+/// after boot or a link drop.
+pub const ADV_FAST_CYCLES: u32 = 30;
+
+/// Whether a slot should advertise at the fast interval.
+///
+/// An unbonded slot always advertises fast: someone is actively trying to pair
+/// with it, and slow discovery just reads as a broken device. A bonded slot only
+/// has to be found by a host that already knows it, so after `ADV_FAST_CYCLES`
+/// it settles back, trading a second or two of reconnect latency for radio time.
+#[must_use]
+pub const fn advertise_fast(bonded: bool, fast_cycles: u32) -> bool {
+    !bonded || fast_cycles < ADV_FAST_CYCLES
+}
+
 /// Whether the backlight may blank.
 ///
 /// An open menu suppresses blanking. Blanking mid-gesture would hide exactly the
@@ -768,5 +784,20 @@ mod tests {
         assert_eq!(c.next_deadline(since), Some(MENU_TIMEOUT_MS));
         c.update(since + 100, SLOT_KEYS[0]); // -> Choosing{ slot: 0, .. }
         assert_eq!(c.next_deadline(since + 100), Some(CLEAR_HOLD_MS));
+    }
+
+    #[test]
+    fn an_unbonded_slot_never_settles_its_advertisement() {
+        // Pairing has to stay easy however long the slot has sat empty.
+        assert!(advertise_fast(false, 0));
+        assert!(advertise_fast(false, ADV_FAST_CYCLES));
+        assert!(advertise_fast(false, u32::MAX));
+    }
+
+    #[test]
+    fn a_bonded_slot_settles_only_after_the_fast_window() {
+        assert!(advertise_fast(true, ADV_FAST_CYCLES - 1));
+        assert!(!advertise_fast(true, ADV_FAST_CYCLES));
+        assert!(!advertise_fast(true, ADV_FAST_CYCLES + 500));
     }
 }

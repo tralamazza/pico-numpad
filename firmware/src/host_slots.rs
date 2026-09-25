@@ -10,6 +10,9 @@ pub const SLOT_KEYS: [u16; SLOT_COUNT] = [1 << 8, 1 << 9, 1 << 10];
 pub const MENU_HOLD_MS: u64 = 3_000;
 pub const CLEAR_HOLD_MS: u64 = 3_000;
 const MENU_TIMEOUT_MS: u64 = 10_000;
+/// A short `+` tap is re-injected for this long so the BLE task still gets a
+/// chance to emit it before the state machine returns to `Ready`.
+const TAP_HOLD_MS: u64 = 30;
 
 /// Blank the backlight after this long with no key activity.
 ///
@@ -289,7 +292,7 @@ impl Controls {
             State::PlusTap(since) => {
                 // Keep a tap visible long enough for the BLE task to send it.
                 input.keys = pressed;
-                if now - since < 30 {
+                if now - since < TAP_HOLD_MS {
                     input.keys |= PLUS;
                 } else {
                     self.state = State::Ready;
@@ -349,6 +352,27 @@ impl Controls {
             }
         }
         input
+    }
+
+    /// Milliseconds from `now` until `update` must run again even with no key
+    /// change, or `None` when the state machine can idle indefinitely.
+    ///
+    /// The interrupt-driven input loop sleeps until this deadline. Every
+    /// time-based transition in `update` has to be mirrored here: a state that
+    /// owns a timer but reports `None` freezes that timer until some unrelated
+    /// event wakes the loop. That is the whole risk of this design, so the
+    /// mapping is asserted by tests rather than trusted.
+    #[must_use]
+    pub fn next_deadline(&self, now: u64) -> Option<u64> {
+        let due = match self.state {
+            // These wait on a key release, not on the clock.
+            State::Ready | State::MenuRelease | State::Passthrough | State::Drain => return None,
+            State::PlusPending(since) => since + MENU_HOLD_MS,
+            State::PlusTap(since) => since + TAP_HOLD_MS,
+            State::Menu(since) => since + MENU_TIMEOUT_MS,
+            State::Choosing { since, .. } => since + CLEAR_HOLD_MS,
+        };
+        Some(due.saturating_sub(now))
     }
 }
 
@@ -697,5 +721,52 @@ mod tests {
     fn backlight_blank_saturates_on_a_clock_that_went_backwards() {
         assert!(!backlight_blank(1_000, 5_000, Menu::Closed));
         assert!(!backlight_blank(0, u64::MAX, Menu::Closed));
+    }
+
+    // The interrupt-driven input loop sleeps until `next_deadline`. A state that
+    // owns a timer but fails to report it freezes that timer until something else
+    // wakes the loop -- so every timed state is pinned down here.
+
+    #[test]
+    fn states_that_wait_on_a_release_report_no_deadline() {
+        let mut c = Controls::new();
+        assert_eq!(c.next_deadline(0), None); // Drain
+        c.update(0, 0); // -> Ready
+        assert_eq!(c.next_deadline(1), None);
+    }
+
+    #[test]
+    fn plus_pending_reports_the_menu_hold_deadline() {
+        let mut c = Controls::new();
+        c.update(0, 0);
+        c.update(100, PLUS); // -> PlusPending(100)
+        assert_eq!(c.next_deadline(100), Some(MENU_HOLD_MS));
+        assert_eq!(c.next_deadline(100 + MENU_HOLD_MS - 1), Some(1));
+        // Already due: saturate rather than wrap around u64.
+        assert_eq!(c.next_deadline(100 + MENU_HOLD_MS + 500), Some(0));
+    }
+
+    #[test]
+    fn a_plus_tap_reports_the_reinject_deadline() {
+        let mut c = Controls::new();
+        c.update(0, 0);
+        c.update(100, PLUS);
+        c.update(101, 0); // released early -> PlusTap(101)
+        assert_eq!(c.next_deadline(101), Some(TAP_HOLD_MS));
+        assert_eq!(c.next_deadline(101 + TAP_HOLD_MS - 1), Some(1));
+    }
+
+    #[test]
+    fn menu_and_slot_hold_report_their_own_deadlines() {
+        let mut c = Controls::new();
+        c.update(0, 0);
+        c.update(1, PLUS);
+        c.update(1 + MENU_HOLD_MS, PLUS); // -> MenuRelease
+        assert_eq!(c.next_deadline(1 + MENU_HOLD_MS), None);
+        let since = 1 + MENU_HOLD_MS + 10;
+        c.update(since, 0); // -> Menu(since)
+        assert_eq!(c.next_deadline(since), Some(MENU_TIMEOUT_MS));
+        c.update(since + 100, SLOT_KEYS[0]); // -> Choosing{ slot: 0, .. }
+        assert_eq!(c.next_deadline(since + 100), Some(CLEAR_HOLD_MS));
     }
 }

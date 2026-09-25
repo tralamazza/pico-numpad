@@ -9,7 +9,7 @@ use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::{self, Channel};
 use embassy_rp::flash::Flash;
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::i2c::{self, Config as I2cConfig, I2c};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH4, I2C0, PIO0, USB};
 use embassy_rp::pio::Pio;
@@ -59,7 +59,10 @@ async fn main(spawner: Spawner) {
     i2c_cfg.sda_pullup = true;
     i2c_cfg.scl_pullup = true;
     let i2c = I2c::new_async(p.I2C0, p.PIN_5, p.PIN_4, Irqs, i2c_cfg);
-    let mut keypad = keypad::Keypad::new(i2c);
+    // TCA9555 INT is wired to GP3 on the Pico RGB Keypad Base with an on-board
+    // 10k pull-up to 3V3 (RM1-7). Nothing else in this firmware uses GP3.
+    let keypad_int = Input::new(p.PIN_3, Pull::Up);
+    let mut keypad = keypad::Keypad::new(i2c, keypad_int);
     keypad.init().await.expect("keypad init");
 
     // --- Backlight: APA102 on SPI0 (CLK=GP18, MOSI=GP19), CS=GP17 ---

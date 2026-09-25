@@ -11,7 +11,7 @@
 
 use defmt::{debug, info, warn};
 use embassy_futures::select::{select, select3, Either, Either3};
-use embassy_time::{with_timeout, Duration, Instant, Ticker, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use trouble_host::prelude::*;
 
 use crate::backlight::{Backlight, NUM_LEDS};
@@ -19,7 +19,7 @@ use crate::config::{led_mode, CONFIG};
 use crate::config_store::{self, HostSlots};
 use crate::hid::{build_report, REPORT_LEN, REPORT_MAP};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
-use crate::keypad::Keypad;
+use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
@@ -170,6 +170,7 @@ pub async fn run<C: Controller>(
         last_leds: None,
         last_brightness: 0,
         last_activity: 0,
+        blanked: false,
     };
     info!(
         "BLE host slot {}: bonded={}",
@@ -327,9 +328,8 @@ async fn connection_task(
     ui: &mut KeypadUi,
 ) -> Option<Action> {
     let mut last_report = None;
-    let mut ticker = Ticker::every(Duration::from_millis(5));
     loop {
-        match select(gatt.next(), ticker.next()).await {
+        match select(gatt.next(), ui.wait_keypad()).await {
             Either::First(event) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("disconnect: {:?}", reason);
@@ -408,9 +408,45 @@ struct KeypadUi {
     last_brightness: u8,
     /// Timestamp of the most recent key press. Drives the idle backlight blank.
     last_activity: u64,
+    /// Whether the backlight is currently blanked. Tracked so the sleep budget
+    /// stops reserving the idle deadline once the LEDs are already off.
+    blanked: bool,
 }
 
 impl KeypadUi {
+    /// How long the input loop may sleep before it must wake anyway.
+    ///
+    /// Three things bound it and the smallest wins:
+    ///
+    /// * the control state machine's next timer-driven transition (hold
+    ///   thresholds, menu expiry). Without this a held key would never reach its
+    ///   3 s threshold, because a key that is merely *held* never toggles INT.
+    /// * the backlight idle deadline -- but only while the LEDs are still lit,
+    ///   otherwise a past deadline would pin the budget at zero.
+    /// * `SAFETY_POLL_MS`, so a lost interrupt degrades to a slow poll instead
+    ///   of a dead keyboard.
+    fn sleep_budget(&self, now: u64) -> u64 {
+        let mut budget = SAFETY_POLL_MS;
+        if let Some(until) = self.controls.next_deadline(now) {
+            budget = budget.min(until);
+        }
+        if !self.blanked {
+            let idle = (self.last_activity + host_slots::LED_IDLE_OFF_MS).saturating_sub(now);
+            budget = budget.min(idle);
+        }
+        // A zero budget would turn the event loop into a busy spin.
+        budget.max(1)
+    }
+
+    /// Block until a key changes, or until the sleep budget runs out.
+    async fn wait_keypad(&mut self) {
+        let budget = self.sleep_budget(Instant::now().as_millis());
+        let wake = self.keypad.wait_change(budget).await;
+        // Compiles away at ship log level; the bench build uses this to tell a
+        // working INT line apart from the safety timer papering over a dead one.
+        debug!("keypad wake: {} (budget {} ms)", wake, budget);
+    }
+
     async fn wait_action(&mut self, hosts: &HostSlots) -> Action {
         loop {
             if let Some(input) = self.poll(hosts, false).await {
@@ -418,7 +454,7 @@ impl KeypadUi {
                     return action;
                 }
             }
-            Timer::after_millis(5).await;
+            self.wait_keypad().await;
         }
     }
 
@@ -440,6 +476,7 @@ impl KeypadUi {
         };
         let mut leds = [[0; 3]; NUM_LEDS];
         let blank = host_slots::backlight_blank(now, self.last_activity, input.menu);
+        self.blanked = blank;
         if input.menu != Menu::Closed {
             // Management feedback must be readable regardless of the user's
             // backlight setting. The old floor of 8 (~26% on the APA102's 0..31

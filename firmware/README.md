@@ -277,6 +277,61 @@ Bluetooth device on that laptop, and pair it again. Other slots can remain paire
 If saving a slot action fails, the LEDs flash red and the old selection/bonds
 remain in use; the Pico does not reboot into unsaved state.
 
+## Power
+
+### Keypad interrupt (GP3)
+
+The TCA9555 `INT` pin is wired to **GP3** on the Pico RGB Keypad Base and is
+pulled high on-board by `RM1-7` (10k to 3V3). It is open drain and active low:
+it asserts when any input changes from the value last read, and is released only
+by reading the input registers. `A0/A1/A2` are tied to GND, which is the `0x20`
+in `keypad.rs`. GP3 is otherwise unused by this firmware.
+
+`Keypad::wait_change()` sleeps on the falling edge instead of polling. Two
+details make that safe:
+
+- **The level is checked before sleeping.** If a key moved during the previous
+  read, the falling edge has already passed but the line is still low. Waiting
+  on the edge there would drop the event until the safety timer fired.
+- **Reading is what clears INT**, so every wake must be followed by a read.
+
+### The sleep budget
+
+Waking on a key change is not sufficient on its own: the 3 s hold, the 30 ms
+tap re-inject, the 10 s menu timeout and the 60 s idle blank all have to fire
+with **no key change at all**. `Controls::next_deadline()` reports when the
+state machine must run again, and the loop sleeps until the earliest of that,
+the backlight deadline, and `SAFETY_POLL_MS`.
+
+A state that owns a timer but fails to report it freezes that timer until
+something else wakes the loop, so the mapping is pinned down by tests rather
+than trusted.
+
+### Safety net
+
+`SAFETY_POLL_MS = 1000` bounds a lost interrupt. Without it a missed IRQ is a
+silently dead keyboard. With it the worst case is up to a second of input
+latency -- degraded, but obvious, and visible as an all-`Timeout` trace. The
+`Wake` enum exists because a dead INT line would otherwise hide behind the timer
+at ten times the intended idle cost.
+
+### Measured
+
+| | Before | After |
+| --- | --- | --- |
+| Idle CPU wakeups / I2C reads | 200/s (5 ms poll) | **1.02/s** |
+| Key latency | up to 5 ms | interrupt-driven |
+
+Idle measured over a 43 s window: 44 wakes, all `Timeout`. During typing,
+`Interrupt` wakes arrive paired with each press and release.
+
+Not measured: absolute current. There is no meter on the bench, so the wake-rate
+reduction is stated and no milliamp figure is implied.
+
+Still open: `cyw43` power management is never configured (the crate defaults to
+`PowerSave`; `Aggressive` is available), and the BLE advertising intervals are
+untuned.
+
 ## Storage
 
 All non-volatile state lives in the **reserved top 64 KiB** of the 4 MiB QSPI

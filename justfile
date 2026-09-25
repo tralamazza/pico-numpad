@@ -84,20 +84,20 @@ flash:
 ship:
     cd firmware && DEFMT_LOG={{LOG_SHIP}} cargo run --release -- --verify
 
-# Report the ship image size (uses arm-none-eabi-size when present; Apple's
-# /usr/bin/size cannot read ARM ELF).
+# Report the ship image size (uses arm-none-eabi-size if present; Apple's size cannot read ARM ELF).
 size:
     @BIN=firmware/target/thumbv8m.main-none-eabihf/release/pico-numpad; \
     if command -v arm-none-eabi-size >/dev/null 2>&1; then SZ=arm-none-eabi-size; else SZ=size; fi; \
     "$SZ" "$BIN" | awk 'NR==2 {printf "ship image: %d bytes flash (text+data) of the 4032K region, %d bytes ram (bss)\n", $1+$2, $3}'
 
-# Serve the WebUSB editor locally on http://localhost:8080.
+# The editor is a single static file in web/ with no build step.
 #
-# This is the URL the firmware advertises as its WebUSB landing page, so the
-# browser's "pico-numpad detected" notification only resolves to something real
-# while this is running. WebUSB treats http://localhost as a secure context, so
-# the editor works from here; any other host needs HTTPS, and the browser grants
-# USB access per origin, so each origin needs its own one-time grant.
+# This is the landing URL the firmware advertises, so the browser's "pico-numpad
+# detected" notification only resolves while this is running. WebUSB treats
+# http://localhost as a secure context; any other host needs HTTPS. USB access is
+# granted per origin, so each origin needs its own one-time grant.
+
+# Serve the WebUSB config editor at http://localhost:8080.
 serve:
     python3 -m http.server 8080 --bind 127.0.0.1 --directory web
 

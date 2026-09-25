@@ -47,10 +47,6 @@ pub enum Wake {
 const REG_INPUT0: u8 = 0x00;
 const REG_CONFIG0: u8 = 0x06;
 
-/// Number of keys on the pad.
-#[allow(dead_code)]
-pub const NUM_KEYS: usize = 16;
-
 pub struct Keypad<'d> {
     i2c: I2c<'d, Async>,
     int: Input<'d>,

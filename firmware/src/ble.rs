@@ -4,9 +4,12 @@
 //! input report, plus a minimal Device Information service (0x180A) carrying the
 //! `PnP` ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
 
-// The `#[gatt_server]`/`#[gatt_service]` macros rebuild the structs and drop
-// per-field attributes, so service fields the app never reads (e.g. `dis`) are
-// reported as dead even though the generated registration uses them.
+// `#[gatt_server]`/`#[gatt_service]` rebuild these structs and drop per-field
+// attributes, so service fields the app never reads directly (`hid`, `dis`) are
+// reported dead even though the generated registration uses them. A field-level
+// or struct-level `#[allow(dead_code)]` does not survive the macro expansion, so
+// this has to sit at module scope. The cost is that a genuinely unused item
+// elsewhere in this file is silenced too.
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn};
@@ -23,6 +26,10 @@ use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
+///
+/// The `#[allow(dead_code)]` here is redundant with the module-level one; it is
+/// kept because the field it protects (`hid`) is only reachable through code the
+/// `#[gatt_server]` macro generates.
 #[allow(dead_code)]
 #[gatt_server]
 pub struct Server {
@@ -77,10 +84,10 @@ const ADV_INTERVAL_FAST: Duration = Duration::from_millis(160);
 /// extra reconnect latency.
 const ADV_INTERVAL_IDLE: Duration = Duration::from_millis(800);
 
-/// How many advertisement cycles keep the fast interval before settling. Each
-/// cycle is roughly a second, so this is about half a minute of easy discovery
-/// after boot or a drop.
 /// Advertisement interval for the current bond state and idle streak.
+///
+/// The cycle count that gates the fast window lives with the decision itself, in
+/// [`host_slots::advertise_fast`].
 #[must_use]
 fn adv_interval(bonded: bool, fast_cycles: u32) -> Duration {
     if host_slots::advertise_fast(bonded, fast_cycles) {

@@ -143,10 +143,10 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let webusb_config = WEBUSB_CONFIG.init(WebUsbConfig {
         max_packet_size: MAX_PACKET,
         vendor_code: 1,
-        // Served by `just serve`. This URL is what the browser's "pico-numpad
-        // detected" notification points at, so it only helps while that server
-        // is running. GitHub Pages would make it always-live, but Pages is not
-        // available for a private repo on the current plan -- see README.
+        // What the browser's "pico-numpad detected" notification points at.
+        // `just serve` puts the editor here, so the nudge is only useful while
+        // that server is running -- the firmware cannot defer or rate-limit it,
+        // it fires on every enumeration.
         landing_url: Some(Url::new("http://localhost:8080")),
     });
 
@@ -193,7 +193,9 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     // are released by NLL at their last use.
     drop(func);
 
-    // Append HID after both vendor interfaces: WebUSB keeps interface 1 and EP1.
+    // HID is appended last on purpose. The WebUSB editor opens the vendor bulk
+    // interface by a fixed number (`IFACE` in web/index.html), so putting HID
+    // ahead of it would shift that number and silently break the editor.
     builder.handler(EVENTS.init(UsbEvents));
     let keyboard = HidWriter::<_, 9>::new(
         &mut builder,

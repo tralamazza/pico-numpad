@@ -4,7 +4,7 @@
 //! matrix). Each key pulls its line low when pressed, so the pressed mask is the
 //! bitwise NOT of the input registers.
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_rp::gpio::Input;
 use embassy_rp::i2c::{Async, Error, I2c};
 use embassy_time::{Instant, Timer};

@@ -12,7 +12,7 @@
 use core::ops::Range;
 
 use defmt::{info, warn};
-use embassy_rp::flash::{Async, Flash, ERASE_SIZE};
+use embassy_rp::flash::{Async, ERASE_SIZE, Flash};
 use embassy_rp::peripherals::FLASH;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -23,7 +23,7 @@ use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
 use trouble_host::prelude::BondInformation;
 
-use crate::config::{Config, CONFIG, CONFIG_LEN};
+use crate::config::{CONFIG, CONFIG_LEN, Config};
 use crate::host_slots::Slots;
 
 /// Total QSPI flash on the Pico 2 W.

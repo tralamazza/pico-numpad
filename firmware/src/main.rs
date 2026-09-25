@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cyw43::{aligned_bytes, Cyw43439};
+use cyw43::{Cyw43439, aligned_bytes};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::{info, unwrap};
 use embassy_executor::Spawner;

@@ -46,7 +46,7 @@ but keeps `info` and above, so a shipped device still reports config load, activ
 slot, BLE connect and pairing on RTT. Measured flash for this app (text+data,
 pre-fat-LTO, so the deltas are what to trust):
 `error` 668,196 / `warn` 677,344 / `info` 679,884 / `debug` 686,808 bytes.
-The current ship image at `info` with fat LTO is 642,500 bytes out of a 4032 K
+The current ship image at `info` with fat LTO is 642,484 bytes out of a 4032 K
 region. Adjust `LOG_SHIP` in the
 [`../justfile`](../justfile) if you want a different cut.
 

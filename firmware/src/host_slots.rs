@@ -216,10 +216,10 @@ pub fn menu_colors(
     now: u64,
 ) -> [[u8; 3]; SLOT_COUNT] {
     core::array::from_fn(|i| {
-        if let Menu::Holding { slot, progress } = menu {
-            if slot == i as u8 {
-                return [ramp(70, 150, progress), ramp(55, 0, progress), 0];
-            }
+        if let Menu::Holding { slot, progress } = menu
+            && slot == i as u8
+        {
+            return [ramp(70, 150, progress), ramp(55, 0, progress), 0];
         }
         let level = if i == active as usize && (now / 400).is_multiple_of(2) {
             25

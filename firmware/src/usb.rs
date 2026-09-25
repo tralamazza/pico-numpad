@@ -14,11 +14,11 @@
 //! All responses are padded to 33 bytes so the host can always read a fixed size.
 //! ```
 
-use crate::hid::{usb_report, REPORT_LEN, REPORT_MAP};
+use crate::hid::{REPORT_LEN, REPORT_MAP, usb_report};
 use defmt::{info, warn};
 use embassy_futures::join::join3;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::hid::{
     Config as HidConfig, HidBootProtocol, HidSubclass, HidWriter, State as HidState,
 };
@@ -31,7 +31,7 @@ use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::StaticCell;
 
-use crate::config::{Config, CONFIG, CONFIG_LEN};
+use crate::config::{CONFIG, CONFIG_LEN, Config};
 
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
@@ -85,12 +85,11 @@ async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>)
             } else {
                 [0; REPORT_LEN]
             };
-            if last != Some(report) {
-                if let Ok(Ok(())) =
+            if last != Some(report)
+                && let Ok(Ok(())) =
                     with_timeout(Duration::from_millis(20), writer.write(&usb_report(report))).await
-                {
-                    last = Some(report);
-                }
+            {
+                last = Some(report);
             }
         }
         Timer::after_millis(5).await;

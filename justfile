@@ -68,7 +68,8 @@ test:
 #   error 668,196   warn 677,344   info 679,884   debug 686,808
 # Those absolutes pre-date fat LTO. The relative deltas still hold -- `info` is
 # 2.5 KiB over `warn`, and `debug` adds ~7 KiB of cyw43 HCI rx/tx and embassy
-# spam on top. Current ship image at `info` with fat LTO: 642,500 bytes.
+# spam on top. Current ship image at `info` with fat LTO: 642,484 bytes
+# (`just size` is the authority; these figures drift with every code change).
 # `info` is the ship level: it keeps the app's state transitions (config loaded,
 # slot active, connected, pairing complete) for that 2.5 KiB over `warn`, and
 # still drops the debug spam.

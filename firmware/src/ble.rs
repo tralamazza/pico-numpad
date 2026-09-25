@@ -13,14 +13,14 @@
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn};
-use embassy_futures::select::{select, select3, Either, Either3};
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use trouble_host::prelude::*;
 
 use crate::backlight::{Backlight, NUM_LEDS};
-use crate::config::{led_mode, CONFIG};
+use crate::config::{CONFIG, led_mode};
 use crate::config_store::{self, HostSlots};
-use crate::hid::{build_report, REPORT_LEN, REPORT_MAP};
+use crate::hid::{REPORT_LEN, REPORT_MAP, build_report};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::recovery;
@@ -139,7 +139,9 @@ pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'stat
                 };
                 if restored {
                     if matches!(action, recovery::Action::ResetBonds) {
-                        info!("host bonds cleared; every previously paired host must forget this device before it can pair again");
+                        info!(
+                            "host bonds cleared; every previously paired host must forget this device before it can pair again"
+                        );
                         flash_bonds_cleared(&mut backlight).await;
                     } else {
                         info!("host storage recovered; restarting");
@@ -299,13 +301,13 @@ async fn app_loop<C: Controller>(
                 // A link came up, so the next time we are disconnected the host is
                 // likely still around and should find us quickly.
                 fast_cycles = 0;
-                if let Some(bond) = &hosts.bonds[hosts.active as usize] {
-                    if !bond.identity.match_identity(&conn.peer_identity()) {
-                        warn!("rejecting peer outside active host slot");
-                        conn.disconnect();
-                        Timer::after_millis(100).await;
-                        continue;
-                    }
+                if let Some(bond) = &hosts.bonds[hosts.active as usize]
+                    && !bond.identity.match_identity(&conn.peer_identity())
+                {
+                    warn!("rejecting peer outside active host slot");
+                    conn.disconnect();
+                    Timer::after_millis(100).await;
+                    continue;
                 }
                 let empty = hosts.bonds[hosts.active as usize].is_none();
                 if let Err(e) = conn.set_bondable(empty) {
@@ -506,10 +508,10 @@ impl KeypadUi {
 
     async fn wait_action(&mut self, hosts: &HostSlots) -> Action {
         loop {
-            if let Some(input) = self.poll(hosts, false).await {
-                if let Some(action) = input.action {
-                    return action;
-                }
+            if let Some(input) = self.poll(hosts, false).await
+                && let Some(action) = input.action
+            {
+                return action;
             }
             self.wait_keypad().await;
         }

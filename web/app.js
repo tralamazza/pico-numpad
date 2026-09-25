@@ -560,16 +560,19 @@ async function connect() {
     toast("WebUSB is not available in this browser. Use Chrome or Edge.", "err", 6000);
     return;
   }
-  await withBusy(async () => {
-    device = await navigator.usb.requestDevice({ filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }] });
-    await device.open();
-    await device.selectConfiguration(1);
-    await device.claimInterface(IFACE);
-    device.addEventListener("disconnect", onDeviceGone);
-    setChip("on", `Connected · ${device.productName || "pico-numpad"}`);
-    setControls();
-    await loadConfig();
+  // No withBusy() here on purpose: the click handler already wraps this call, so
+  // wrapping again would hit that guard's `if (busy) return` and bail out before
+  // requestDevice() ever ran -- the button would do nothing at all.
+  device = await navigator.usb.requestDevice({
+    filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }],
   });
+  await device.open();
+  await device.selectConfiguration(1);
+  await device.claimInterface(IFACE);
+  device.addEventListener("disconnect", onDeviceGone);
+  setChip("on", `Connected · ${device.productName || "pico-numpad"}`);
+  setControls();
+  await loadConfig();
 }
 
 function onDeviceGone() {

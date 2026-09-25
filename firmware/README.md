@@ -513,8 +513,8 @@ Use the recipes in [`../justfile`](../justfile) as the authoritative command lis
 
 CI runs `just check` plus a ship build on every push and pull request
 ([`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)), using the pinned
-toolchain. It cannot cover the flash path, so the hardware checks in
-[`../PLAN.md`](../PLAN.md) are still on you.
+toolchain. It cannot cover the flash path: flashing over SWD, pairing with real
+hosts, and battery life still need the hardware in hand.
 
 ### Duplicate-input check (macOS)
 

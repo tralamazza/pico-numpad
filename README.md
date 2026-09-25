@@ -83,7 +83,6 @@ firmware/     Rust firmware
 web/        single-file WebUSB config editor, no build step
 tools/      macOS-side helpers: duplicate-input check, RTT capture
 justfile    commands
-PLAN.md     original build plan and review log
 ```
 
 `firmware/README.md` covers the flash storage layout and its failure modes, the

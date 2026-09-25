@@ -14,7 +14,7 @@
 //! All responses are padded to 33 bytes so the host can always read a fixed size.
 //! ```
 
-use crate::hid::{REPORT_LEN, REPORT_MAP, usb_report};
+use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, REPORT_MAP, usb_consumer_report, usb_report};
 use defmt::{info, warn};
 use embassy_futures::join::join3;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
@@ -39,9 +39,19 @@ static SUSPENDED: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 static KEY_REPORT: Mutex<CriticalSectionRawMutex, (u32, [u8; REPORT_LEN])> =
     Mutex::new((0, [0; REPORT_LEN]));
+static CONSUMER_REPORT: Mutex<CriticalSectionRawMutex, (u32, [u8; CONSUMER_REPORT_LEN])> =
+    Mutex::new((0, [0; CONSUMER_REPORT_LEN]));
 
-pub async fn publish_report(report: [u8; REPORT_LEN]) {
-    *KEY_REPORT.lock().await = (GENERATION.load(Ordering::Relaxed), report);
+/// Publish both input reports for the current key state.
+///
+/// Sent together rather than via two separate calls so a reader cannot observe a
+/// half-updated state -- both reports come from the same poll of the keys, and
+/// splitting them would let the keyboard report land a moment before the media
+/// one.
+pub async fn publish_reports(report: [u8; REPORT_LEN], consumer: [u8; CONSUMER_REPORT_LEN]) {
+    let generation = GENERATION.load(Ordering::Relaxed);
+    *KEY_REPORT.lock().await = (generation, report);
+    *CONSUMER_REPORT.lock().await = (generation, consumer);
 }
 
 pub fn keyboard_active() -> bool {
@@ -71,26 +81,45 @@ impl embassy_usb::Handler for UsbEvents {
 
 async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>) {
     let mut last = None;
+    let mut last_consumer = None;
     let mut generation = GENERATION.load(Ordering::Relaxed);
     loop {
         let current = GENERATION.load(Ordering::Relaxed);
         if generation != current || !keyboard_active() {
             last = None;
+            last_consumer = None;
             generation = current;
         }
         if keyboard_active() {
             let (report_generation, value) = *KEY_REPORT.lock().await;
+            let (consumer_generation, consumer_value) = *CONSUMER_REPORT.lock().await;
             // Never replay a report from before reset, unconfigure, or suspend.
             let report = if report_generation == current {
                 value
             } else {
                 [0; REPORT_LEN]
             };
+            let consumer = if consumer_generation == current {
+                consumer_value
+            } else {
+                [0; CONSUMER_REPORT_LEN]
+            };
+            // One endpoint carries both report types; the ID prefixed onto the
+            // payload is what tells the host which collection it belongs to.
             if last != Some(report)
                 && let Ok(Ok(())) =
                     with_timeout(Duration::from_millis(20), writer.write(&usb_report(report))).await
             {
                 last = Some(report);
+            }
+            if last_consumer != Some(consumer)
+                && let Ok(Ok(())) = with_timeout(
+                    Duration::from_millis(20),
+                    writer.write(&usb_consumer_report(consumer)),
+                )
+                .await
+            {
+                last_consumer = Some(consumer);
             }
         }
         Timer::after_millis(5).await;

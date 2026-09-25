@@ -21,7 +21,7 @@ use crate::backlight::{Backlight, NUM_LEDS};
 use crate::config::led_mode;
 use crate::config_bus::CONFIG;
 use crate::config_store::{self, HostSlots};
-use crate::hid::{REPORT_LEN, REPORT_MAP, build_report};
+use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, REPORT_MAP, build_reports};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::recovery;
@@ -57,6 +57,16 @@ struct HidService {
     #[characteristic(uuid = characteristic::REPORT, read, notify, value = [0u8; REPORT_LEN], permissions(encrypted))]
     #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x01u8, 0x01])]
     report: [u8; REPORT_LEN],
+
+    /// Consumer / media input report (Report ID 2). One consumer usage per
+    /// report, on usage page 0x0C -- see the second collection in `REPORT_MAP`.
+    ///
+    /// A separate characteristic with its own Report Reference descriptor is how
+    /// HOGP carries a second report type. The host tells the two apart by the
+    /// Report ID in the reference descriptor, not by UUID.
+    #[characteristic(uuid = characteristic::REPORT, read, notify, value = [0u8; CONSUMER_REPORT_LEN], permissions(encrypted))]
+    #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x02u8, 0x01])]
+    consumer_report: [u8; CONSUMER_REPORT_LEN],
 }
 
 /// Device Information service (0x180A).
@@ -327,7 +337,7 @@ async fn app_loop<C: Controller>(
                     warn!("security request failed: {:?}", e);
                 }
                 info!("connected on host slot {}", hosts.active + 1);
-                let action = connection_task(&gatt, &server.hid.report, hosts, ui).await;
+                let action = connection_task(&gatt, &server.hid, hosts, ui).await;
                 gatt.raw().disconnect();
                 drop(gatt);
                 if let Some(action) = action {
@@ -377,11 +387,16 @@ async fn restart() -> ! {
 
 async fn connection_task(
     gatt: &GattConnection<'_, '_, DefaultPacketPool>,
-    report: &Characteristic<[u8; REPORT_LEN]>,
+    hid: &HidService,
     hosts: &mut HostSlots,
     ui: &mut KeypadUi,
 ) -> Option<Action> {
+    // Bound here rather than in the signature so the call site stays on one
+    // line: app_loop is close to clippy's line limit.
+    let report = &hid.report;
+    let consumer_report = &hid.consumer_report;
     let mut last_report = None;
+    let mut last_consumer = None;
     loop {
         match select(gatt.next(), ui.wait_keypad()).await {
             Either::First(event) => match event {
@@ -426,12 +441,29 @@ async fn connection_task(
                         report.notify(gatt, &[0; REPORT_LEN], true),
                     )
                     .await;
+                    // Same for a media key held across a slot switch.
+                    let _ = with_timeout(
+                        Duration::from_millis(100),
+                        consumer_report.notify(gatt, &[0; CONSUMER_REPORT_LEN], true),
+                    )
+                    .await;
                     return Some(action);
                 }
-                let value = build_report(input.keys, &CONFIG.lock().await.keymap);
+                let (value, consumer) = {
+                    let cfg = CONFIG.lock().await;
+                    build_reports(input.keys, &cfg.keymap, cfg.consumer_mask)
+                };
+
+                // Each report is tracked and sent independently. A host may
+                // subscribe to one and not the other, and the two change on
+                // different keys, so they must not gate each other.
+                //
+                // The `!should_notify` arm deliberately does not send: it only
+                // clears the memo so that when the host *does* subscribe the
+                // current state goes out even if nothing has been pressed since
+                // connection. Notifying unconditionally here would spam on every
+                // idle poll.
                 if !report.should_notify(gatt) {
-                    // Send the current state as soon as the host subscribes, even
-                    // if the physical keys have not changed since connection.
                     last_report = None;
                 } else if last_report != Some(value) {
                     match with_timeout(
@@ -446,6 +478,24 @@ async fn connection_task(
                         }
                         Ok(Err(e)) => warn!("notify failed: {:?}", e),
                         Err(_) => warn!("notify timed out"),
+                    }
+                }
+
+                if !consumer_report.should_notify(gatt) {
+                    last_consumer = None;
+                } else if last_consumer != Some(consumer) {
+                    match with_timeout(
+                        Duration::from_millis(100),
+                        consumer_report.notify(gatt, &consumer, true),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            debug!("media report={=[u8]:02x}", consumer);
+                            last_consumer = Some(consumer);
+                        }
+                        Ok(Err(e)) => warn!("media notify failed: {:?}", e),
+                        Err(_) => warn!("media notify timed out"),
                     }
                 }
             }
@@ -527,7 +577,11 @@ impl KeypadUi {
         }
         let usb_active = crate::usb::keyboard_active();
         let (usb_keys, ble_keys) = self.router.update(input.keys, usb_active, connected);
-        crate::usb::publish_report(build_report(usb_keys, &CONFIG.lock().await.keymap)).await;
+        let (usb_kbd, usb_consumer) = {
+            let cfg = CONFIG.lock().await;
+            build_reports(usb_keys, &cfg.keymap, cfg.consumer_mask)
+        };
+        crate::usb::publish_reports(usb_kbd, usb_consumer).await;
         input.keys = ble_keys;
         let connected = connected || usb_active;
         let (mode, mut brightness) = {

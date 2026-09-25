@@ -84,6 +84,24 @@ flash:
 ship:
     cd firmware && DEFMT_LOG={{LOG_SHIP}} cargo run --release -- --verify
 
+# picotool, not elf2uf2-rs: elf2uf2-rs 2.2.0 stamps the output with the RP2040
+# family ID, and the RP2350 BOOTSEL checks that field before flashing. picotool
+# tags it rp2350-arm-s. The family is passed explicitly rather than left to
+# inference so that targeting the wrong chip fails loudly instead of producing an
+# image the bootloader silently refuses.
+#
+# The input is copied to a .elf path because picotool picks the input format from
+# the file extension and the cargo output has none.
+
+# Convert the ship image to UF2 for BOOTSEL drag-and-drop flashing.
+uf2:
+    @just build
+    @ELF=firmware/target/pico-numpad.elf; \
+     UF2=firmware/target/pico-numpad.uf2; \
+     cp firmware/target/thumbv8m.main-none-eabihf/release/pico-numpad "$ELF"; \
+     picotool uf2 convert "$ELF" "$UF2" --family rp2350-arm-s; \
+     picotool info "$UF2"
+
 # Report the ship image size (uses arm-none-eabi-size if present; Apple's size cannot read ARM ELF).
 size:
     @BIN=firmware/target/thumbv8m.main-none-eabihf/release/pico-numpad; \

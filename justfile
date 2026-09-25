@@ -56,12 +56,15 @@ test:
 # image. Set here (not only in .cargo/config.toml) so the two profiles stay apart
 # and a bare `cargo` call still defaults to full tracing.
 #
-# Measured flash for this app (text+data; bss is RAM and is 39,860 at every
-# level), with its 26 warn!/17 info!/1 error!:
+# Measured flash for this app (text+data; bss is RAM and is ~39.9 KiB at every
+# level), with its 26 warn!/18 info!/1 error!:
 #   error 668,196   warn 677,344   info 679,884   debug 686,808
+# Those absolutes pre-date fat LTO. The relative deltas still hold -- `info` is
+# 2.5 KiB over `warn`, and `debug` adds ~7 KiB of cyw43 HCI rx/tx and embassy
+# spam on top. Current ship image at `info` with fat LTO: 642,500 bytes.
 # `info` is the ship level: it keeps the app's state transitions (config loaded,
-# slot active, connected, pairing complete) for 2.5 KiB over `warn`, and still
-# drops the cyw43 HCI rx/tx and embassy debug spam that costs ~7 KiB at `debug`.
+# slot active, connected, pairing complete) for that 2.5 KiB over `warn`, and
+# still drops the debug spam.
 LOG_SHIP := "info"
 LOG_BENCH := "debug"
 
@@ -88,14 +91,13 @@ size:
     if command -v arm-none-eabi-size >/dev/null 2>&1; then SZ=arm-none-eabi-size; else SZ=size; fi; \
     "$SZ" "$BIN" | awk 'NR==2 {printf "ship image: %d bytes flash (text+data) of the 4032K region, %d bytes ram (bss)\n", $1+$2, $3}'
 
-# Serve the WebUSB editor locally.
+# Serve the WebUSB editor locally on http://localhost:8080.
 #
-# The deployed copy is on GitHub Pages -- see .github/workflows/pages.yml; the
-# firmware's landing_url in usb.rs points there, so the browser nudge opens the
-# real page. Use this instead when iterating on the editor without deploying, or
-# with no network. WebUSB treats http://localhost as a secure context, so the
-# editor behaves the same either way -- but note the browser grants USB access
-# per origin, so localhost and the Pages site each need their own one-time grant.
+# This is the URL the firmware advertises as its WebUSB landing page, so the
+# browser's "pico-numpad detected" notification only resolves to something real
+# while this is running. WebUSB treats http://localhost as a secure context, so
+# the editor works from here; any other host needs HTTPS, and the browser grants
+# USB access per origin, so each origin needs its own one-time grant.
 serve:
     python3 -m http.server 8080 --bind 127.0.0.1 --directory web
 

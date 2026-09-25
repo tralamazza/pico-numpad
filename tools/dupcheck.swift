@@ -1,9 +1,10 @@
 // dupcheck.swift -- host-side check for duplicate HID input across transports.
 //
-// PLAN item: "Explicitly verify no duplicate input with USB and BLE both
-// connected." The firmware routes USB ahead of BLE and is unit-tested for it
-// (routing.rs: usb_wins_without_duplicate_ble_input), but that has never been
-// verified end-to-end against a real host with both transports attached.
+// The firmware routes USB ahead of BLE and is unit-tested for it (routing.rs:
+// usb_wins_without_duplicate_ble_input), but that has never been verified
+// end-to-end against a real host with both transports attached. See the
+// "Duplicate-input check (macOS)" section of firmware/README.md for how to run
+// it and how to read the result.
 //
 // This taps the HID input reports of every pico-numpad device on the host
 // (vendor 0x2e8a) via IOHIDManager, tags each report with its transport

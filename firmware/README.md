@@ -43,9 +43,11 @@ just ship    # flash the quiet ship image over SWD
 
 The ship profile drops the `debug!` flood (cyw43 HCI `rx`/`tx`, embassy internals)
 but keeps `info` and above, so a shipped device still reports config load, active
-slot, BLE connect and pairing on RTT. Measured flash for this app (text+data):
-`error` 668,196 / `warn` 677,344 / `info` 679,884 / `debug` 686,808 bytes, out
-of a 4032 K region. Adjust `LOG_SHIP` in the
+slot, BLE connect and pairing on RTT. Measured flash for this app (text+data,
+pre-fat-LTO, so the deltas are what to trust):
+`error` 668,196 / `warn` 677,344 / `info` 679,884 / `debug` 686,808 bytes.
+The current ship image at `info` with fat LTO is 642,500 bytes out of a 4032 K
+region. Adjust `LOG_SHIP` in the
 [`../justfile`](../justfile) if you want a different cut.
 
 Run Cargo commands from **`firmware/`**, so Cargo picks up its `.cargo/config.toml`
@@ -79,6 +81,18 @@ Use the exact ELF that is on the board for RTT decoding; defmt indexes its strin
 table per build, so the wrong ELF decodes log lines as unrelated strings. Run
 only one probe-rs session at a time; stop an existing RTT reader before starting
 another flash or attach command.
+
+`just flash` drops its RTT stream when the debug link hiccups, which on this board
+means losing the gesture you were trying to capture. `tools/capture.sh` attaches
+without reflashing and re-attaches automatically when the link drops, so a long
+observation survives that:
+
+```sh
+./tools/capture.sh /tmp/rtt.log   # default log path if omitted
+pkill -f capture.sh               # stop it
+```
+
+It reads the `diagnostic` ELF, so run `just diag` first.
 
 ## USB keyboard and Bluetooth routing
 
@@ -140,15 +154,11 @@ http://localhost:8080 to connect". That comes from the `landing_url` in the
 WebUSB descriptor in `usb.rs`; the firmware cannot rate-limit it, so it reappears
 on every plug-in and every flash.
 
-Hosting the editor on GitHub Pages would make that notification point at
-something that is always up, and WebUSB would be happy there since Pages serves
-HTTPS. **It is not available while this repo is private** -- the Pages API returns
-"Your current plan does not support GitHub Pages for this repository", and
-`configure-pages` fails with `Resource not accessible by integration` even with
-`pages: write`, because first-time enablement needs admin plus a plan that allows
-Pages on private repos. Making the repo public, or moving to GitHub Pro, would
-unblock it; the workflow and the URL change are both small and were written and
-verified before hitting the plan wall.
+Hosting the editor somewhere always-on would let that notification resolve
+without a local server. WebUSB only needs a secure context, so any HTTPS host
+works -- GitHub Pages included. Doing that means changing `landing_url` in
+`usb.rs` to match the deployed URL and deploying the static `web/` directory;
+there is no build step, so the deploy is just uploading that directory.
 
 ## Three Bluetooth host slots
 
@@ -169,7 +179,7 @@ firmware. Bonds and the selected slot survive power cycles and normal reflashes.
 Hold the **physical bottom-right `+` key for three seconds**, then release it.
 The physical `1`, `2`, and `3` keys (third row, first three columns) show the slots:
 
-- **Filling white, on the `+` key you are holding:** the menu-open hold is in
+- **Filling amber, on the `+` key you are holding:** the menu-open hold is in
   progress. It ramps from dim to bright across the three seconds, so you can see
   the gesture registered and know to keep pressing. Before this there was no
   feedback whatsoever during that hold, which made the gesture undiscoverable.
@@ -182,10 +192,8 @@ The physical `1`, `2`, and `3` keys (third row, first three columns) show the sl
   is **cleared**. The color shift is the "about to become destructive" cue — a
   static amber could not tell you whether releasing would select or wipe.
 
-Both fills are visible even with normal backlighting disabled.
-
-The menu is visible even with normal backlighting disabled. These controls use
-physical key positions, regardless of custom key mappings.
+Both fills stay visible even with the normal backlight disabled, and these
+controls use physical key positions regardless of custom key mappings.
 
 ### Switch laptops
 
@@ -419,7 +427,7 @@ pairing material.
 **Never raise that `LENGTH` to 4096K.** The linker would then place code over the
 storage region and flashing would overwrite the config, the legacy bond, and the
 slot journal. The 64 KiB reservation is a deliberate cost: the ship image is
-~665 KiB against a 4032 KiB budget, so there is no pressure to reclaim it.
+~627 KiB against a 4032 KiB budget, so there is no pressure to reclaim it.
 
 ### What actually gets written
 

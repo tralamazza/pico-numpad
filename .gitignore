@@ -1,12 +1,13 @@
 # Rust build artifacts
 target/
 
-# Web app (added in a later phase)
-node_modules/
-web/dist/
-
 # Editor / OS cruft
 .DS_Store
 
 # Real pairing material dumped from the device by `just backup-storage`.
+#
+# This contains live BLE bond keys (LTK/IRK) for every paired host. Never commit
+# it. Note that .gitignore is not a protection against `git add -f`, nor against
+# the whole directory being archived or copied somewhere that gets published --
+# keep an out-of-tree copy as well.
 pico-numpad-config-backup.bin

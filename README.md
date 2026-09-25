@@ -99,6 +99,21 @@ then open `http://localhost:8080`. WebUSB requires a secure context; both HTTPS
 and `localhost` qualify. USB access is granted per origin, so the Pages site and
 localhost each need their own one-time grant.
 
+## Media keys
+
+Any key can be a media key. In the editor, switch the assignment panel from
+**Keyboard** to **Media** and pick a control: play/pause, next and previous
+track, stop, eject, mute, volume up and down, repeat, the menu controls, power
+and sleep. Media keys are reported on the Consumer page (`0x0C`) instead of the
+keyboard page, so they reach the operating system's media handling rather than
+typing a character.
+
+Sixteen controls are available, not any consumer usage. The set is fixed by the
+HID descriptor, which declares each control individually — macOS will not route
+a control it cannot see declared at parse time. The AL application-launch
+usages (`0x18A` Calculator, `0x196` Internet Browser) are excluded for a
+second reason: they are 16-bit and the config stores one byte per key.
+
 ## Layout
 
 ```
@@ -106,7 +121,8 @@ firmware/     Rust firmware
   src/        embedded application
   tests/      host-side tests for the hardware-free logic
 web/        single-file WebUSB config editor, no build step
-tools/      macOS-side helpers: duplicate-input check, RTT capture
+tools/      macOS-side helpers: duplicate-input check, RTT capture, favicon
+            generator, WebUSB editor selftest, hardware config round-trip
 justfile    commands
 ```
 

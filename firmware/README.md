@@ -300,6 +300,34 @@ Bluetooth device on that laptop, and pair it again. Other slots can remain paire
 If saving a slot action fails, the LEDs flash red and the old selection/bonds
 remain in use; the Pico does not reboot into unsaved state.
 
+### Media keys
+
+Consumer (media) keys live on a **second HID interface**, not a second
+collection on the keyboard's interface, and each control is declared as its own
+1-bit field rather than as a usage array. Both of those were established by
+testing on macOS, not by preference, and neither is obvious from the spec:
+
+- With both collections on one interface, macOS creates a single `IOHIDDevice`
+  and takes the first collection's usage as the device's primary usage — page 1
+  usage 6, keyboard. The consumer pair still appears in `DeviceUsagePairs`, but
+  the keyboard driver owns the device and never runs volume-key handling over
+  it. Reports arrive and nothing happens.
+- With a usage array (`Usage Minimum 0x00, Usage Maximum 0xFF`), macOS accepts
+  the descriptor, creates the Consumer Control device, and receives the
+  reports — and routes none of them. Declaring each control explicitly, as
+  Apple's own keyboards do, is what makes volume move.
+
+`CONSUMER_KEYS` in `src/hid.rs` is the single source of truth: the descriptor
+is generated from it by a const fn, and the consumer report is a bitmask over
+it. The web editor keeps its own list in a different language, so
+`tools/webusb-selftest.py` parses both and fails if they disagree. A media key
+outside that list has no bit and does nothing, which is why the editor does not
+offer one.
+
+Over BLE the two collections share one report map, as HOGP requires, so
+`REPORT_MAP` is the two USB descriptors concatenated rather than written out a
+third time.
+
 ## Power
 
 ### Keypad interrupt (GP3)

@@ -85,8 +85,9 @@ pub const CONSUMER_KEYS: [u8; 14] = [
 ];
 
 /// The consumer report is a bitmask over [`CONSUMER_KEYS`], one bit per key,
-/// little-endian. Rounded up so the length stays right for any key count;
-/// `/ 8` alone would silently drop the last six keys at 14.
+/// little-endian. Rounded up rather than divided: at 14 keys `/ 8` gives 1,
+/// which would not even typecheck against the 2 bytes a 14-bit mask needs, but
+/// `div_ceil` is both correct for any key count and says so explicitly.
 pub const CONSUMER_REPORT_LEN: usize = CONSUMER_KEYS.len().div_ceil(8);
 
 /// Generate the consumer report descriptor from [`CONSUMER_KEYS`].

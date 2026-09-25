@@ -18,7 +18,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::once_lock::OnceLock;
 use embedded_storage_async::nor_flash::NorFlash;
-use sequential_storage::cache::NoCache;
+use sequential_storage::cache::Cache;
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
 use trouble_host::prelude::BondInformation;
@@ -118,11 +118,11 @@ fn bond_range() -> Range<u32> {
 async fn load_bond() -> Result<Option<BondInformation>, &'static str> {
     let store = STORE.try_get().ok_or("config store not initialised")?;
     let mut flash = store.flash.lock().await;
-    let Some(config) = MapConfig::try_new(bond_range()) else {
+    let Ok(config) = MapConfig::try_new(bond_range()) else {
         warn!("bond range invalid");
         return Err("bond range invalid");
     };
-    let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
+    let mut map = MapStorage::new(&mut *flash, config, Cache::new_uncached());
     let mut buf = [0u8; 256];
     match map.fetch_item(&mut buf, &()).await {
         Ok(Some(StoredBond(bond))) => {
@@ -143,8 +143,8 @@ pub async fn load_hosts() -> Result<HostSlots, &'static str> {
     let existing = {
         let mut flash = store.flash.lock().await;
         let config = MapConfig::try_new(HOSTS_OFFSET..HOSTS_OFFSET + HOSTS_LEN)
-            .ok_or("host slot range invalid")?;
-        let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
+            .map_err(|_| "host slot range invalid")?;
+        let mut map = MapStorage::new(&mut *flash, config, Cache::new_uncached());
         let mut buf = [0u8; 1024];
         map.fetch_item::<HostSlots>(&mut buf, &())
             .await
@@ -176,11 +176,11 @@ pub async fn save_hosts(hosts: &HostSlots) -> bool {
         return false;
     };
     let mut flash = store.flash.lock().await;
-    let Some(config) = MapConfig::try_new(HOSTS_OFFSET..HOSTS_OFFSET + HOSTS_LEN) else {
+    let Ok(config) = MapConfig::try_new(HOSTS_OFFSET..HOSTS_OFFSET + HOSTS_LEN) else {
         warn!("host slot range invalid");
         return false;
     };
-    let mut map = MapStorage::new(&mut *flash, config, NoCache::new());
+    let mut map = MapStorage::new(&mut *flash, config, Cache::new_uncached());
     let mut buf = [0u8; 1024];
     match map.store_item(&mut buf, &(), hosts).await {
         Ok(()) => {

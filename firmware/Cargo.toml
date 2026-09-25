@@ -25,7 +25,7 @@ trouble-host = { version = "0.8", features = ["default-packet-pool-mtu-128", "de
 
 # Utilities
 serde = { version = "1", default-features = false, features = ["derive"] }
-sequential-storage = { version = "7", default-features = false, features = ["postcard"] }
+sequential-storage = { version = "8", default-features = false, features = ["postcard"] }
 defmt = "1.0"
 defmt-rtt = "1.0"
 panic-probe = { version = "1.0", features = ["print-defmt"] }

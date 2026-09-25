@@ -434,14 +434,21 @@ impl KeypadUi {
         };
         let mut leds = [[0; 3]; NUM_LEDS];
         if input.menu != Menu::Closed {
-            // Management feedback is visible even when normal backlight is off.
-            brightness = brightness.max(8);
+            // Management feedback must be readable regardless of the user's
+            // backlight setting. The old floor of 8 (~26% on the APA102's 0..31
+            // scale) left the hold fill effectively invisible: the ramp peaked at
+            // rgb [168,74,0] and still read as nothing on the bench.
+            brightness = brightness.max(24);
             let colors = host_slots::menu_colors(
                 core::array::from_fn(|i| hosts.bonds[i].is_some()),
                 hosts.active,
                 input.menu,
                 now,
             );
+            // LED index == physical key bit index: the 16 keys sit on the TCA9555's
+            // 16 GPIOs and the APA102 chain is wired in the same order, so a key's
+            // bit position is also its LED position. Verified on hardware for the
+            // slot keys (bits/LEDs 8, 9, 10) and the `+` key (bit/LED 15).
             for (i, key) in SLOT_KEYS.iter().enumerate() {
                 leds[key.trailing_zeros() as usize] = colors[i];
             }

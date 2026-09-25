@@ -157,12 +157,12 @@ fn ramp(from: u8, to: u8, progress: u8) -> u8 {
 }
 
 /// Color of the `+` key while its hold is still building. The key the user is
-/// actually pressing fills from dim to bright over the three seconds, which is
-/// the only signal that the gesture registered and they should keep going.
+/// actually pressing ramps up in amber -- the same "a control is being held"
+/// family the slot keys use -- from dim to bright over the three seconds, which
+/// is the only signal that the gesture registered and they should keep going.
 #[must_use]
 pub fn enter_fill(progress: u8) -> [u8; 3] {
-    let level = ramp(25, 120, progress);
-    [level, level, level]
+    [ramp(90, 255, progress), ramp(40, 130, progress), 0]
 }
 
 /// Bonded slots are green, empty slots blue. The active slot pulses without
@@ -626,14 +626,21 @@ mod tests {
     fn plus_key_fills_brighter_as_the_hold_builds() {
         let start = enter_fill(0);
         let end = enter_fill(100);
-        assert_eq!(start, [25, 25, 25]);
-        assert_eq!(end, [120, 120, 120]);
+        assert!(
+            end[0] > start[0],
+            "must visibly brighten: {start:?} -> {end:?}"
+        );
+        assert!(end[1] > start[1]);
+        // Amber, not white: red strictly dominates green, and blue stays off.
+        assert!(
+            start[0] > start[1] && end[0] > end[1],
+            "amber ramp, never white: {start:?} -> {end:?}"
+        );
+        assert_eq!(start[2], 0);
+        assert_eq!(end[2], 0);
         assert!(
             start[0] > 0,
             "visible even at zero progress, backlight may be off"
         );
-        assert!(end[0] > start[0]);
-        assert_eq!(start[0], start[1]);
-        assert_eq!(start[1], start[2], "neutral white, not a status color");
     }
 }

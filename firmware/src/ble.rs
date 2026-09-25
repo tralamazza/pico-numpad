@@ -67,8 +67,15 @@ struct DisService {
     #[characteristic(uuid = characteristic::MODEL_NUMBER_STRING, read, value = "Pico RGB Keypad")]
     model: &'static str,
 
-    /// `PnP` ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x0001, ver 0x0100.
-    #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x02u8, 0x8a, 0x2e, 0x01, 0x00, 0x00, 0x01])]
+    /// `PnP` ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x000A, ver 0x0100.
+    ///
+    /// The PID matches the one in the USB descriptor. HOGP says a device that is
+    /// also a USB device reports the same VID/PID on both transports, so a host
+    /// correlating the two sees one product rather than two. It used to be
+    /// 0x0001 here, which did not match. macOS caches this characteristic
+    /// against the existing bond, so a host paired before this change may keep
+    /// reporting the old value until it is re-paired.
+    #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x02u8, 0x8a, 0x2e, 0x0a, 0x00, 0x00, 0x01])]
     pnp_id: [u8; 7],
 }
 

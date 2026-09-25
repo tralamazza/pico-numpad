@@ -534,7 +534,6 @@ function setControls() {
   $("ledMode").disabled = !on;
   $("preset").disabled = !on;
   $("search").disabled = !on;
-  if (!device) setChip("", "Not connected");
   refreshDirty();
 }
 
@@ -569,7 +568,6 @@ async function connect() {
   await device.open();
   await device.selectConfiguration(1);
   await device.claimInterface(IFACE);
-  device.addEventListener("disconnect", onDeviceGone);
   setChip("on", `Connected · ${device.productName || "pico-numpad"}`);
   setControls();
   await loadConfig();
@@ -584,6 +582,17 @@ function onDeviceGone() {
   toast("Device disconnected.", "warn");
 }
 
+// Disconnect events are fired by navigator.usb, not by the device: USBDevice
+// is not an EventTarget, so `device.addEventListener(...)` throws TypeError.
+// Registered once here rather than per-connect so repeated connects cannot
+// stack handlers.
+if (navigator.usb) {
+  navigator.usb.addEventListener("disconnect", (e) => {
+    // Only react to our own pad; other WebUSB devices may come and go.
+    if (device && e.device === device) onDeviceGone();
+  });
+}
+
 async function disconnect() {
   if (!device) return;
   const dying = device;
@@ -595,7 +604,6 @@ async function disconnect() {
     // Release the interface and close the handle. Leaving them claimed keeps the
     // device held by this tab, so another origin (or a reload of this one)
     // cannot open it until the tab is closed.
-    dying.removeEventListener("disconnect", onDeviceGone);
     await dying.releaseInterface(IFACE);
     await dying.close();
     setChip("", "Not connected");

@@ -188,8 +188,13 @@ dupcheck *args:
     swiftc -O tools/dupcheck.swift -o /tmp/pico-numpad-dupcheck
     /tmp/pico-numpad-dupcheck {{args}}
 
+# Drive the web editor's WebUSB paths in headless Chromium with a faithful
+# navigator.usb stub. No hardware needed; needs a Chromium-family browser.
+webtest:
+    python3 tools/webusb-selftest.py
+
 # fmt-check + clippy + tests.
 check: fmt-check lint test
 
-# Everything portable plus the macOS-only host harness selftest.
-check-macos: check dupcheck-selftest
+# Everything portable plus the macOS-only host harness selftest and the browser test.
+check-macos: check dupcheck-selftest webtest

@@ -38,6 +38,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/configure-pages@v6
+        with:
+          # Creates the Pages site on first run, configured for Actions deploys.
+          # Without this the action only reads an existing site and fails with
+          # "Not Found" on a repo that has never had Pages enabled.
+          enablement: true
 
       # The editor is one self-contained HTML file: no build step, no external
       # assets, no dependency install. The artifact is just the directory.

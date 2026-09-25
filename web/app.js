@@ -222,6 +222,12 @@ function nameFor(code, isMedia) {
  * stores one byte per key; that is what excludes the 16-bit AL application
  * launch usages (0x18A Calculator, 0x196 Internet Browser). */
 const MEDIA_KEYS = [
+  // Keep in sync with CONSUMER_KEYS in firmware/src/hid.rs; the selftest parses
+  // both and fails if they disagree.
+  //
+  // Power (0x30) and Sleep (0x32) are deliberately absent. Both map to real
+  // shutdown/sleep key events on macOS and Linux, so a single press next to
+  // the volume keys could power off the host. They are not offered.
   [0xcd, "Play / Pause", "⏯"],
   [0xb5, "Next Track", "⏭"],
   [0xb6, "Previous Track", "⏮"],
@@ -236,8 +242,6 @@ const MEDIA_KEYS = [
   [0x42, "Menu Up", "▲"],
   [0x43, "Menu Down", "▼"],
   [0x46, "Menu Escape", "✕"],
-  [0x30, "Power", "⏻"],
-  [0x32, "Sleep", "☾"],
 ];
 const MEDIA_NAME = new Map(MEDIA_KEYS.map(([c, n]) => [c, n]));
 

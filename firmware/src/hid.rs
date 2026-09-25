@@ -60,7 +60,14 @@ pub const REPORT_LEN: usize = 8;
 /// The descriptor below is generated from this list, and the web editor must
 /// offer exactly these codes: a code that is not here has no bit and would
 /// silently do nothing. `tools/webusb-selftest.py` checks the two agree.
-pub const CONSUMER_KEYS: [u8; 16] = [
+/// The controls this pad offers, in mask-bit order.
+///
+/// Deliberately excludes the Consumer usages that would let a single keypress
+/// next to the volume keys shut the host down: `0x30` System Power Down and
+/// `0x32` System Sleep both map to real, destructive-by-default key events on
+/// Linux (`KEY_POWER`, `KEY_SLEEP`) and do the same on macOS. A numpad should
+/// not be able to power off a laptop by accident.
+pub const CONSUMER_KEYS: [u8; 14] = [
     0xcd, // Play / Pause
     0xb5, // Scan Next Track
     0xb6, // Scan Previous Track
@@ -75,13 +82,12 @@ pub const CONSUMER_KEYS: [u8; 16] = [
     0x42, // Menu Up
     0x43, // Menu Down
     0x46, // Menu Escape
-    0x30, // Power
-    0x32, // Sleep
 ];
 
 /// The consumer report is a bitmask over [`CONSUMER_KEYS`], one bit per key,
-/// little-endian. 16 keys therefore fit in 2 bytes.
-pub const CONSUMER_REPORT_LEN: usize = CONSUMER_KEYS.len() / 8;
+/// little-endian. Rounded up so the length stays right for any key count;
+/// `/ 8` alone would silently drop the last six keys at 14.
+pub const CONSUMER_REPORT_LEN: usize = CONSUMER_KEYS.len().div_ceil(8);
 
 /// Generate the consumer report descriptor from [`CONSUMER_KEYS`].
 ///
@@ -143,7 +149,7 @@ const CONSUMER_MAP_BYTES: [u8; CON_MAP_LEN] = consumer_report_map();
 /// `A + B` in a const-generic return type needs the unstable
 /// `generic_const_exprs`, so the sizes are named constants instead.
 const KBD_MAP_LEN: usize = 47;
-const CON_MAP_LEN: usize = 8 + 12 * 16 + 1;
+const CON_MAP_LEN: usize = 8 + 12 * CONSUMER_KEYS.len() + 1;
 
 const fn concat_maps(
     a: &[u8; KBD_MAP_LEN],
@@ -359,6 +365,28 @@ mod tests {
         assert_eq!(cons, [0x00, 0x00]);
     }
 
+    /// A config saved before Power/Sleep were withdrawn still has the mask bit
+    /// and the usage byte. It must go inert, not leak into the keyboard report
+    /// as a stray keystroke -- `continue` in `build_reports` is what makes that
+    /// true, and this pins it down.
+    #[test]
+    fn a_previously_assigned_power_key_is_inert_not_a_stray_keystroke() {
+        for usage in [0x30u8, 0x32] {
+            let mut keymap = [0x5f; 16];
+            keymap[4] = usage;
+            let (kbd, cons) = build_reports(1 << 4, &keymap, 1 << 4);
+            assert_eq!(
+                cons,
+                [0x00, 0x00],
+                "{usage:#04x} must not emit a consumer bit"
+            );
+            assert_eq!(
+                kbd, [0; REPORT_LEN],
+                "{usage:#04x} must not fall through to the keyboard report"
+            );
+        }
+    }
+
     /// Every key the descriptor declares must be reachable, and each must land
     /// on a distinct bit.
     #[test]
@@ -373,7 +401,11 @@ mod tests {
             assert_eq!(bits & seen, 0, "usage {usage:#04x} reuses a bit");
             seen |= bits;
         }
-        assert_eq!(seen, 0xffff, "all 16 declared keys should be reachable");
+        assert_eq!(
+            seen,
+            (1u16 << CONSUMER_KEYS.len()) - 1,
+            "every declared key should be reachable and no bit left unreachable"
+        );
     }
 
     /// A key mapped to a media code is only a media key if its mask bit is set.

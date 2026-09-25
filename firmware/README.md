@@ -104,18 +104,19 @@ The editor keeps its existing vendor interfaces and bulk endpoints.
 
 1. Connect the Pico's own USB port to the computer with a data-capable cable.
    The debug probe's USB connection alone does not expose the configurator.
-2. Open <https://tralamazza.github.io/pico-numpad/> in Chrome or Edge. The
-   browser's "pico-numpad detected" notification points at this page: the
-   firmware advertises it as its WebUSB landing URL in the BOS descriptor, which
-   is what makes that notification appear when the device enumerates.
+2. From the repository root, serve the editor:
 
-   For local iteration without deploying, run `just serve` and open
-   <http://localhost:8080>. Either way the page must come from a secure context
-   -- HTTPS or localhost -- never a `file://` URL, because WebUSB requires one.
+   ```sh
+   just serve
+   ```
 
-3. Click **Connect** and select **pico-numpad** in the browser's USB picker.
-   The browser grants USB access per origin, so the Pages site and localhost are
-   separate one-time grants; switching where you host it means granting again.
+3. Open <http://localhost:8080> in Chrome or Edge. The page must come from a
+   secure context -- HTTPS or localhost -- never a `file://` URL, because WebUSB
+   requires one.
+
+4. Click **Connect** and select **pico-numpad** in the browser's USB picker.
+   The browser grants USB access per origin, so if the editor is ever hosted
+   somewhere else, that origin needs its own one-time grant.
 5. Edit the key mappings, LED mode, or brightness, then click **Save to flash**.
    Wait for **Saved to flash.** before unplugging or restarting the Pico.
 
@@ -131,6 +132,23 @@ separate copy from flash. These controls never clear Bluetooth pairings.
 
 The editor is optional: USB keyboard input works without a browser. Closing the
 editor does not disable USB keyboard priority.
+
+### The browser notification
+
+When the device enumerates, Chrome/Brave pops "pico-numpad detected -- go to
+http://localhost:8080 to connect". That comes from the `landing_url` in the
+WebUSB descriptor in `usb.rs`; the firmware cannot rate-limit it, so it reappears
+on every plug-in and every flash.
+
+Hosting the editor on GitHub Pages would make that notification point at
+something that is always up, and WebUSB would be happy there since Pages serves
+HTTPS. **It is not available while this repo is private** -- the Pages API returns
+"Your current plan does not support GitHub Pages for this repository", and
+`configure-pages` fails with `Resource not accessible by integration` even with
+`pages: write`, because first-time enablement needs admin plus a plan that allows
+Pages on private repos. Making the repo public, or moving to GitHub Pro, would
+unblock it; the workflow and the URL change are both small and were written and
+verified before hitting the plan wall.
 
 ## Three Bluetooth host slots
 

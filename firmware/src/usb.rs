@@ -143,7 +143,11 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let webusb_config = WEBUSB_CONFIG.init(WebUsbConfig {
         max_packet_size: MAX_PACKET,
         vendor_code: 1,
-        landing_url: Some(Url::new("https://tralamazza.github.io/pico-numpad/")),
+        // Served by `just serve`. This URL is what the browser's "pico-numpad
+        // detected" notification points at, so it only helps while that server
+        // is running. GitHub Pages would make it always-live, but Pages is not
+        // available for a private repo on the current plan -- see README.
+        landing_url: Some(Url::new("http://localhost:8080")),
     });
 
     let mut config = UsbConfig::new(VID, PID);

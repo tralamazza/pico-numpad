@@ -143,10 +143,13 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
         max_packet_size: MAX_PACKET,
         vendor_code: 1,
         // What the browser's "pico-numpad detected" notification points at.
-        // `just serve` puts the editor here, so the nudge is only useful while
-        // that server is running -- the firmware cannot defer or rate-limit it,
+        // Deployed to GitHub Pages by .github/workflows/pages.yml, so the nudge
+        // resolves without running anything locally. `just serve` still works
+        // for iterating on the editor, but the browser grants USB access per
+        // origin -- a grant for the Pages origin does not cover localhost and
+        // vice versa. The firmware cannot defer or rate-limit the notification;
         // it fires on every enumeration.
-        landing_url: Some(Url::new("http://localhost:8080")),
+        landing_url: Some(Url::new("https://tralamazza.github.io/pico-numpad/")),
     });
 
     let mut config = UsbConfig::new(VID, PID);

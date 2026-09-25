@@ -86,13 +86,18 @@ just serve     # WebUSB config editor at http://localhost:8080
 
 ## Editing the keymap
 
+The editor is hosted at <https://tralamazza.github.io/pico-numpad/>. Open it in
+Chrome or Brave, click **Connect**, select the device.
+
+To run it locally instead — offline, or while iterating on the editor:
+
 ```sh
 just serve
 ```
 
-Open `http://localhost:8080` in Chrome or Brave, click **Connect**, select the
-device. WebUSB requires a secure context; `http://localhost` qualifies. USB access
-is granted per origin, so each origin needs its own one-time grant.
+then open `http://localhost:8080`. WebUSB requires a secure context; both HTTPS
+and `localhost` qualify. USB access is granted per origin, so the Pages site and
+localhost each need their own one-time grant.
 
 ## Layout
 

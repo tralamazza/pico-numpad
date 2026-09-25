@@ -115,15 +115,12 @@ The editor keeps its existing vendor interfaces and bulk endpoints.
 
 1. Connect the Pico's own USB port to the computer with a data-capable cable.
    The debug probe's USB connection alone does not expose the configurator.
-2. From the repository root, serve the editor:
+2. Open <https://tralamazza.github.io/pico-numpad/> in Chrome or Edge. To run
+   the editor locally instead, `just serve` and use
+   <http://localhost:8080>.
 
-   ```sh
-   just serve
-   ```
-
-3. Open <http://localhost:8080> in Chrome or Edge. The page must come from a
-   secure context -- HTTPS or localhost -- never a `file://` URL, because WebUSB
-   requires one.
+3. The page must come from a secure context -- HTTPS or localhost -- never a
+   `file://` URL, because WebUSB requires one.
 
 4. Click **Connect** and select **pico-numpad** in the browser's USB picker.
    The browser grants USB access per origin, so if the editor is ever hosted
@@ -147,15 +144,15 @@ editor does not disable USB keyboard priority.
 ### The browser notification
 
 When the device enumerates, Chrome/Brave pops "pico-numpad detected -- go to
-http://localhost:8080 to connect". That comes from the `landing_url` in the
-WebUSB descriptor in `usb.rs`; the firmware cannot rate-limit it, so it reappears
-on every plug-in and every flash.
+https://tralamazza.github.io/pico-numpad/ to connect". That comes from the
+`landing_url` in the WebUSB descriptor in `usb.rs`; the firmware cannot
+rate-limit it, so it reappears on every plug-in and every flash.
 
-Hosting the editor somewhere always-on would let that notification resolve
-without a local server. WebUSB only needs a secure context, so any HTTPS host
-works -- GitHub Pages included. Doing that means changing `landing_url` in
-`usb.rs` to match the deployed URL and deploying the static `web/` directory;
-there is no build step, so the deploy is just uploading that directory.
+The editor is hosted on GitHub Pages (`.github/workflows/pages.yml`) so that
+notification resolves without anyone running a local server -- WebUSB only needs
+a secure context and Pages serves HTTPS. Note the browser grants USB access per
+origin: a grant given to the Pages site does not cover `localhost`, or vice
+versa.
 
 ## Three Bluetooth host slots
 

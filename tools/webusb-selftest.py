@@ -121,6 +121,37 @@ window.addEventListener("load", async () => {
   r.push(["grid loaded from device (KP 7 on key 1)",
           document.getElementById("pad").textContent.includes("KP 7")]);
 
+  // --- consumer / media keys ---
+  document.getElementById("modeMedia").click();
+  await wait(60);
+  r.push(["media mode lists consumer keys",
+          document.getElementById("groups").textContent.includes("Volume Up")]);
+
+  document.getElementById("pad").children[0].click();
+  await wait(60);
+  const vol = [...document.querySelectorAll("#groups button.pick")]
+    .find((b) => b.textContent.includes("Volume Up"));
+  if (vol) vol.click();
+  await wait(60);
+  const k0 = document.getElementById("pad").children[0];
+  r.push(["media key shows its consumer name on the pad",
+          k0.textContent.includes("Volume Up")]);
+  r.push(["media key carries the media tag", !!k0.querySelector(".tag")]);
+  r.push(["consumer mask bit 0 set and code 0xE9 in keymap",
+          (draft[20] & 0x01) === 0x01 && draft[2] === 0xe9]);
+
+  // Reassigning from the keyboard list must clear the mask, otherwise the key
+  // would keep firing on the consumer page.
+  document.getElementById("modeKbd").click();
+  await wait(60);
+  const kp7 = [...document.querySelectorAll("#groups button.pick")]
+    .find((b) => b.textContent.includes("KP 7"));
+  if (kp7) kp7.click();
+  await wait(60);
+  const k0b = document.getElementById("pad").children[0];
+  r.push(["keyboard reassign clears the media tag and mask bit",
+          !k0b.querySelector(".tag") && draft[2] === 0x5f && (draft[20] & 0x01) === 0]);
+
   // A disconnect fired by navigator.usb must be reflected in the chip and not
   // be immediately clobbered back to "Not connected" by setControls().
   const ev = new Event("disconnect");

@@ -4,7 +4,7 @@
  * Wire protocol. Mirrors firmware/src/usb.rs and firmware/src/config.rs.
  * The config is a fixed 32-byte little-endian record:
  *   [0]=magic 0xC0  [1]=version  [2..18]=keymap  [18]=brightness
- *   [19]=led_mode  [20..31]=reserved  [31]=checksum
+ *   [19]=led_mode  [20..22]=consumer_mask  [22..31]=reserved  [31]=checksum
  * Bytes we do not manage are carried through untouched on write, so a newer
  * firmware's reserved fields survive an edit from an older editor.
  * ------------------------------------------------------------------ */
@@ -20,7 +20,10 @@ const CONFIG_LEN = 32;
 const KEYMAP_OFF = 2;
 const BRIGHTNESS_OFF = 18;
 const LEDMODE_OFF = 19;
+const CONSUMER_MASK_OFF = 20;
 const CHECKSUM_OFF = 31;
+const VERSION = 2;
+// v1 records have no consumer mask; they read back with no media keys.
 
 const CMD_GET = 0x01;
 const CMD_SET = 0x02;
@@ -157,10 +160,12 @@ const PRESETS = {
 function factoryBytes() {
   const b = new Uint8Array(CONFIG_LEN);
   b[0] = 0xc0; // magic
-  b[1] = 1; // version
+  b[1] = VERSION; // version
   PRESETS.factory.keymap.forEach((u, i) => (b[KEYMAP_OFF + i] = u));
   b[BRIGHTNESS_OFF] = 8;
   b[LEDMODE_OFF] = 1; // HIGHLIGHT
+  b[CONSUMER_MASK_OFF] = 0;
+  b[CONSUMER_MASK_OFF + 1] = 0;
   b[CHECKSUM_OFF] = checksum(b);
   return b;
 }
@@ -170,6 +175,7 @@ let raw = factoryBytes();   // last state read from / written to the device
 let draft = factoryBytes(); // working copy
 let selected = null;                    // physical key bit being edited
 let capturing = false;
+let mediaMode = false;                  // picker shows consumer keys
 let busy = false;
 
 const $ = (id) => document.getElementById(id);
@@ -204,9 +210,47 @@ function checksum(bytes) {
 // factoryBytes() runs at declaration time above, so checksum must exist by then.
 // Function declarations hoist, so it does.
 
-function nameFor(code) {
-  return USAGE_NAME.get(code) ?? `0x${code.toString(16).padStart(2, "0")}`;
+function nameFor(code, isMedia) {
+  const fallback = `0x${code.toString(16).padStart(2, "0")}`;
+  if (isMedia) return MEDIA_NAME.get(code) ?? fallback;
+  return USAGE_NAME.get(code) ?? fallback;
 }
+
+/* Consumer-page (0x0C) usages, checked against the USB-IF HID Usage Tables
+ * rather than recalled -- 0xE5 is Bass Boost, not brightness, and 0x82 is
+ * Mode Step, not System Wake Up. Codes are capped at 0xFF because the config
+ * stores one byte per key; that is what excludes the 16-bit AL application
+ * launch usages (0x18A Calculator, 0x196 Internet Browser). */
+const MEDIA_KEYS = [
+  [0xcd, "Play / Pause", "⏯"],
+  [0xb5, "Next Track", "⏭"],
+  [0xb6, "Previous Track", "⏮"],
+  [0xb7, "Stop", "⏹"],
+  [0xb8, "Eject", "⏏"],
+  [0xe2, "Mute", "🔇"],
+  [0xe9, "Volume Up", "🔊"],
+  [0xea, "Volume Down", "🔉"],
+  [0xbc, "Repeat", "↻"],
+  [0x40, "Menu", "☰"],
+  [0x41, "Menu Pick", "✓"],
+  [0x42, "Menu Up", "▲"],
+  [0x43, "Menu Down", "▼"],
+  [0x46, "Menu Escape", "✕"],
+  [0x30, "Power", "⏻"],
+  [0x32, "Sleep", "☾"],
+];
+const MEDIA_NAME = new Map(MEDIA_KEYS.map(([c, n]) => [c, n]));
+
+/* consumer_mask: bit i set => key i emits its code on the consumer page. */
+function maskGet(bytes) {
+  return bytes[CONSUMER_MASK_OFF] | (bytes[CONSUMER_MASK_OFF + 1] << 8);
+}
+function maskSet(bytes, bit, on) {
+  const next = on ? maskGet(bytes) | (1 << bit) : maskGet(bytes) & ~(1 << bit);
+  bytes[CONSUMER_MASK_OFF] = next & 0xff;
+  bytes[CONSUMER_MASK_OFF + 1] = (next >> 8) & 0xff;
+}
+const isMediaKey = (i) => (maskGet(draft) & (1 << i)) !== 0;
 
 function dirtyKeys() {
   const out = [];
@@ -248,17 +292,22 @@ function renderPad() {
     const code = draft[KEYMAP_OFF + i];
     const cell = document.createElement("button");
     cell.type = "button";
-    cell.className =
-      "key" + (selected === i ? " sel" : "") + (changed.has(i) ? " changed" : "");
     cell.setAttribute("role", "gridcell");
+    const media = isMediaKey(i);
+    cell.className =
+      "key" +
+      (selected === i ? " sel" : "") +
+      (changed.has(i) ? " changed" : "") +
+      (media ? " media" : "");
     cell.setAttribute(
       "aria-label",
-      `Physical key ${PHYS[i]}, assigned ${nameFor(code)}. Activate to reassign.`
+      `Physical key ${PHYS[i]}, assigned ${nameFor(code, media)}. Activate to reassign.`
     );
     cell.innerHTML =
       `<span class="code">0x${code.toString(16).padStart(2, "0")}</span>` +
       `<span class="phys">${PHYS[i]}</span>` +
-      `<span class="assign${code === 0 ? " none" : ""}">${nameFor(code)}</span>`;
+      `<span class="assign${code === 0 ? " none" : ""}">${nameFor(code, media)}</span>` +
+      (media ? `<span class="tag">media</span>` : "");
     cell.addEventListener("click", () => selectKey(i));
     pad.appendChild(cell);
   }
@@ -270,7 +319,11 @@ function renderGroups() {
   wrap.innerHTML = "";
   let shown = 0;
 
-  for (const group of KEY_GROUPS) {
+  const groups = mediaMode
+    ? [{ name: "Consumer / media", keys: MEDIA_KEYS.map(([c, n]) => [c, n]) }]
+    : KEY_GROUPS;
+
+  for (const group of groups) {
     const matches = group.keys.filter(([code, name]) => {
       if (!q) return true;
       return (
@@ -292,7 +345,7 @@ function renderGroups() {
       b.type = "button";
       b.className = "pick" + (selected !== null && draft[KEYMAP_OFF + selected] === code ? " active" : "");
       b.innerHTML = `${name} <code>0x${code.toString(16).padStart(2, "0")}</code>`;
-      b.addEventListener("click", () => assign(code));
+      b.addEventListener("click", () => assign(code, mediaMode));
       row.appendChild(b);
       shown++;
     }
@@ -321,7 +374,7 @@ function renderCapture() {
   } else {
     el.className = "capture idle";
     $("captureMsg").innerHTML =
-      `<strong>${PHYS[selected]}</strong> → ${nameFor(draft[KEYMAP_OFF + selected])}. ` +
+      `<strong>${PHYS[selected]}</strong> → ${nameFor(draft[KEYMAP_OFF + selected], isMediaKey(selected))}. ` +
       `Press it again on your keyboard, or pick from the list.`;
   }
 }
@@ -365,18 +418,20 @@ function selectKey(i) {
   renderGroups();
 }
 
-function assign(code) {
+function assign(code, isMedia) {
   if (selected === null) {
     toast("Select a key on the pad first.", "warn");
     return;
   }
   const prev = draft[KEYMAP_OFF + selected];
+  const prevMedia = isMediaKey(selected);
   draft[KEYMAP_OFF + selected] = code & 0xff;
+  maskSet(draft, selected, !!isMedia);
   capturing = false;
   $("search").value = "";
   renderAll();
-  if (prev !== code) {
-    toast(`${PHYS[selected]} → ${nameFor(code)}. Not saved yet.`);
+  if (prev !== code || prevMedia !== !!isMedia) {
+    toast(`${PHYS[selected]} → ${nameFor(code, !!isMedia)}. Not saved yet.`);
   }
 }
 
@@ -417,8 +472,16 @@ async function recvResponse(expectedCmd = null) {
 }
 
 function loadDraftFrom(bytes) {
-  raw = bytes.slice(0, CONFIG_LEN);
-  draft = raw.slice(0, CONFIG_LEN);
+  const b = bytes.slice(0, CONFIG_LEN);
+  // A v1 record has no consumer mask. Zero those bytes rather than carry
+  // whatever a future version left in them, matching what the firmware does on
+  // read so the editor and the device never disagree.
+  if (b[1] < VERSION) {
+    b[CONSUMER_MASK_OFF] = 0;
+    b[CONSUMER_MASK_OFF + 1] = 0;
+  }
+  raw = b;
+  draft = b.slice(0, CONFIG_LEN);
 }
 
 async function loadConfig() {
@@ -468,14 +531,17 @@ function exportJson() {
   out[CHECKSUM_OFF] = checksum(out);
   const profile = {
     kind: "pico-numpad-profile",
-    version: 1,
+    version: 2,
     exported: new Date().toISOString(),
     brightness: draft[BRIGHTNESS_OFF],
     ledMode: draft[LEDMODE_OFF],
     keymap: Array.from({ length: 16 }, (_, i) => ({
       physical: PHYS[i],
       usage: draft[KEYMAP_OFF + i],
-      name: nameFor(draft[KEYMAP_OFF + i]),
+      // Without this flag a media key would round-trip out of the profile as a
+      // plain keyboard usage with the same numeric code.
+      media: isMediaKey(i),
+      name: nameFor(draft[KEYMAP_OFF + i], isMediaKey(i)),
     })),
     raw: Array.from(out),
   };
@@ -498,6 +564,9 @@ function importJson(file) {
         p.keymap.forEach((entry, i) => {
           const usage = typeof entry === "object" ? entry.usage : entry;
           if (Number.isInteger(usage) && usage >= 0 && usage <= 0xff) next[KEYMAP_OFF + i] = usage;
+          // Set or clear explicitly per entry: leaving the mask alone would keep
+          // a stale media flag on a key the profile does not mention.
+          maskSet(next, i, typeof entry === "object" && !!entry.media);
         });
       } else if (Array.isArray(p.raw) && p.raw.length === CONFIG_LEN) {
         p.raw.forEach((v, i) => {
@@ -656,6 +725,15 @@ presetSel.addEventListener("change", (e) => {
 });
 
 $("search").addEventListener("input", renderGroups);
+
+function setMediaMode(on) {
+  mediaMode = on;
+  $("modeKbd").classList.toggle("on", !on);
+  $("modeMedia").classList.toggle("on", on);
+  renderGroups();
+}
+$("modeKbd").addEventListener("click", () => setMediaMode(false));
+$("modeMedia").addEventListener("click", () => setMediaMode(true));
 document.addEventListener("keydown", onKeyDown);
 
 window.addEventListener("beforeunload", (e) => {

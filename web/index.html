@@ -171,6 +171,27 @@
         content: ""; position: absolute; top: 5px; left: 6px;
         width: 6px; height: 6px; border-radius: 50%; background: var(--warn);
       }
+      /* Consumer/media keys get a corner tag: the code alone (0xE9) does not
+         tell you it is Volume Up rather than a keyboard usage. */
+      .key.media { border-color: #4a3f20; }
+      .key .tag {
+        position: absolute; bottom: 4px; right: 6px;
+        font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
+        color: #e0a34a; border: 1px solid #6b5a20; border-radius: 4px;
+        padding: 0 3px; line-height: 1.5;
+      }
+
+      /* Keyboard / Media picker switch. */
+      .modes { display: flex; gap: 6px; margin-bottom: 8px; }
+      .mode {
+        flex: 1; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+        background: #10151a; border: 1px solid var(--line);
+        color: #8a97a4; font: inherit; font-size: 12px;
+      }
+      .mode.on {
+        background: var(--accent-dim, #1d2a22);
+        border-color: var(--accent); color: var(--text);
+      }
 
       /* ---- assignment panel ---- */
       input[type="search"], input[type="text"], select {
@@ -283,6 +304,10 @@
             <h2>Assign</h2>
             <div class="capture idle" id="capture">
               <span id="captureMsg">Select a key on the pad to reassign it.</span>
+            </div>
+            <div class="modes" role="group" aria-label="Key type">
+              <button type="button" class="mode on" id="modeKbd">Keyboard</button>
+              <button type="button" class="mode" id="modeMedia">Media</button>
             </div>
             <input
               type="search"

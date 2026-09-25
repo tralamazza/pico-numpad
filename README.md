@@ -87,7 +87,8 @@ PLAN.md     original build plan and review log
 ```
 
 `firmware/README.md` covers the flash storage layout and its failure modes, the
-BLE link parameters observed on macOS, the routing rules, and measurements.
+BLE link parameters observed on macOS, the routing rules, the hardware checks
+that automation cannot cover, and measurements.
 
 ## Tests
 
@@ -100,5 +101,10 @@ and battery life.
 
 ## License
 
-No licence has been chosen. Until one is added, standard copyright terms apply and
-the code is not licensed for reuse.
+Apache License 2.0 — see [LICENSE](LICENSE).
+
+One exception, noted so it is not missed: `firmware/cyw43-firmware/*.bin` are
+prebuilt Broadcom/Cypress binaries for the Pico 2 W's wireless module, shipped
+under the Broadcom Permissive Binary License 1.0
+([`firmware/cyw43-firmware/LICENSE-permissive-binary-license-1.0.txt`](firmware/cyw43-firmware/LICENSE-permissive-binary-license-1.0.txt)).
+They are not Apache-2.0 and are not our code.

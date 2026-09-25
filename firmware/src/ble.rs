@@ -445,6 +445,12 @@ impl KeypadUi {
             for (i, key) in SLOT_KEYS.iter().enumerate() {
                 leds[key.trailing_zeros() as usize] = colors[i];
             }
+            if let Menu::Entering(progress) = input.menu {
+                // Fill the key the user is actually holding. During the three
+                // second `+` hold this is the only feedback that the gesture was
+                // registered and that they should keep pressing.
+                leds[host_slots::PLUS.trailing_zeros() as usize] = host_slots::enter_fill(progress);
+            }
         } else if mode != led_mode::OFF {
             for (i, led) in leds.iter_mut().enumerate() {
                 *led = if connected {

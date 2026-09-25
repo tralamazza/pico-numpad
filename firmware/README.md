@@ -148,10 +148,20 @@ firmware. Bonds and the selected slot survive power cycles and normal reflashes.
 Hold the **physical bottom-right `+` key for three seconds**, then release it.
 The physical `1`, `2`, and `3` keys (third row, first three columns) show the slots:
 
+- **Filling white, on the `+` key you are holding:** the menu-open hold is in
+  progress. It ramps from dim to bright across the three seconds, so you can see
+  the gesture registered and know to keep pressing. Before this there was no
+  feedback whatsoever during that hold, which made the gesture undiscoverable.
 - **Green:** a saved pairing exists.
 - **Blue:** empty; ready to pair when selected.
 - **Pulsing green/blue:** currently selected slot, retaining its bond-status color.
-- **Amber:** a slot key is being held; release to select, or keep holding to clear.
+- **Amber rising to red:** a slot key is held, and the fill shows how close the
+  destructive threshold is. Release while it is still **amber** and you have only
+  **selected** the slot. Keep holding until it reaches full **red** and the bond
+  is **cleared**. The color shift is the "about to become destructive" cue — a
+  static amber could not tell you whether releasing would select or wipe.
+
+Both fills are visible even with normal backlighting disabled.
 
 The menu is visible even with normal backlighting disabled. These controls use
 physical key positions, regardless of custom key mappings.

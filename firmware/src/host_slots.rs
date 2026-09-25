@@ -117,12 +117,61 @@ impl Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Closed,
+    /// `+` is being held toward opening the menu. Carries 0..=100 progress so the
+    /// LED can fill: without it a three-second hold looks completely dead and the
+    /// user has no way to learn the gesture exists.
+    Entering(u8),
     Open,
-    Holding(u8),
+    /// A slot key is held. Carries 0..=100 progress toward the destructive clear
+    /// at `CLEAR_HOLD_MS` -- releasing below the threshold only selects the slot,
+    /// holding to full wipes its bond, so the user must be able to tell how much
+    /// is left.
+    Holding {
+        slot: u8,
+        progress: u8,
+    },
+}
+
+/// Percent (0..=100) of the way through a hold of `hold_ms` that began at
+/// `since`. Drives the fill so a long press tells the user to keep going.
+#[must_use]
+pub fn hold_progress(since: u64, now: u64, hold_ms: u64) -> u8 {
+    if hold_ms == 0 {
+        return 100;
+    }
+    now.saturating_sub(since)
+        .saturating_mul(100)
+        .saturating_div(hold_ms)
+        .min(100) as u8
+}
+
+/// Linear ramp between two endpoints by a 0..=100 percentage. The result is
+/// always between two `u8` endpoints, so the fallible conversion cannot fail in
+/// practice; `unwrap_or` keeps it total without a sign-loss cast.
+#[must_use]
+fn ramp(from: u8, to: u8, progress: u8) -> u8 {
+    let p = i32::from(progress);
+    let a = i32::from(from);
+    let b = i32::from(to);
+    u8::try_from(a + ((b - a) * p / 100)).unwrap_or(from)
+}
+
+/// Color of the `+` key while its hold is still building. The key the user is
+/// actually pressing fills from dim to bright over the three seconds, which is
+/// the only signal that the gesture registered and they should keep going.
+#[must_use]
+pub fn enter_fill(progress: u8) -> [u8; 3] {
+    let level = ramp(25, 120, progress);
+    [level, level, level]
 }
 
 /// Bonded slots are green, empty slots blue. The active slot pulses without
-/// changing its status color; a held candidate is amber until the clear fires.
+/// changing its status color.
+///
+/// A held slot ramps amber to red as the clear approaches: release while it is
+/// still amber and you have only selected the slot, hold it to full red and the
+/// bond is wiped. The color shift is the "this is about to become destructive"
+/// cue that a static amber cannot give.
 #[must_use]
 pub fn menu_colors(
     bonded: [bool; SLOT_COUNT],
@@ -131,8 +180,10 @@ pub fn menu_colors(
     now: u64,
 ) -> [[u8; 3]; SLOT_COUNT] {
     core::array::from_fn(|i| {
-        if menu == Menu::Holding(i as u8) {
-            return [100, 40, 0];
+        if let Menu::Holding { slot, progress } = menu {
+            if slot == i as u8 {
+                return [ramp(70, 150, progress), ramp(55, 0, progress), 0];
+            }
         }
         let level = if i == active as usize && (now / 400).is_multiple_of(2) {
             25
@@ -212,6 +263,10 @@ impl Controls {
                 } else if now - since >= MENU_HOLD_MS {
                     self.state = State::MenuRelease;
                     input.menu = Menu::Open;
+                } else {
+                    // Report progress while the hold is still building so the LED
+                    // can fill. Without this the key looks inert for three seconds.
+                    input.menu = Menu::Entering(hold_progress(since, now, MENU_HOLD_MS));
                 }
             }
             State::PlusTap(since) => {
@@ -245,14 +300,20 @@ impl Controls {
                         slot: slot as u8,
                         since: now,
                     };
-                    input.menu = Menu::Holding(slot as u8);
+                    input.menu = Menu::Holding {
+                        slot: slot as u8,
+                        progress: 0,
+                    };
                 } else if pressed != 0 {
                     self.state = State::Drain;
                     input.menu = Menu::Closed;
                 }
             }
             State::Choosing { slot, since } => {
-                input.menu = Menu::Holding(slot);
+                input.menu = Menu::Holding {
+                    slot,
+                    progress: hold_progress(since, now, CLEAR_HOLD_MS),
+                };
                 if pressed == 0 {
                     input.action = Some(Action::Select(slot));
                     self.state = State::Drain;
@@ -307,8 +368,10 @@ mod tests {
         let mut c = Controls::new();
         c.update(0, 0);
         c.update(1, PLUS);
-        assert_eq!(c.update(1_001, PLUS).menu, Menu::Closed);
-        assert_eq!(c.update(3_000, PLUS).menu, Menu::Closed);
+        // The hold reports progress rather than staying Closed, so the LED can
+        // tell the user the gesture registered and they should keep pressing.
+        assert_eq!(c.update(1_001, PLUS).menu, Menu::Entering(33));
+        assert_eq!(c.update(3_000, PLUS).menu, Menu::Entering(99));
         assert_eq!(c.update(3_001, PLUS).menu, Menu::Open);
         assert_eq!(c.update(3_100, PLUS | SLOT_KEYS[0]).action, None);
         assert_eq!(c.update(7_000, SLOT_KEYS[0]).action, None);
@@ -428,8 +491,16 @@ mod tests {
             [0, 25, 0]
         );
         assert_eq!(
-            menu_colors([true, false, true], 0, Menu::Holding(1), 400)[1],
-            [100, 40, 0]
+            menu_colors(
+                [true, false, true],
+                0,
+                Menu::Holding {
+                    slot: 1,
+                    progress: 0
+                },
+                400
+            )[1],
+            [70, 55, 0]
         );
     }
 
@@ -454,5 +525,115 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hold_progress_ramps_linearly_and_clamps_at_full() {
+        assert_eq!(hold_progress(0, 0, 3_000), 0);
+        assert_eq!(hold_progress(0, 1_500, 3_000), 50);
+        assert_eq!(hold_progress(0, 2_999, 3_000), 99);
+        assert_eq!(hold_progress(0, 3_000, 3_000), 100);
+        // Never overshoot, and never wrap on a clock that went backwards.
+        assert_eq!(hold_progress(0, 99_000, 3_000), 100);
+        assert_eq!(hold_progress(5_000, 1_000, 3_000), 0);
+        assert_eq!(hold_progress(0, 0, 0), 100);
+    }
+
+    #[test]
+    fn plus_hold_reports_entering_progress_across_the_whole_three_seconds() {
+        let mut c = Controls::new();
+        c.update(0, 0);
+        c.update(1, PLUS);
+        let mut seen = Vec::new();
+        for t in (2..3_000).step_by(300) {
+            match c.update(t, PLUS).menu {
+                Menu::Entering(p) => seen.push(p),
+                other => panic!("expected Entering at t={t}, got {other:?}"),
+            }
+        }
+        assert!(seen.len() >= 9, "expected samples across the hold");
+        assert!(
+            seen.windows(2).all(|w| w[0] <= w[1]),
+            "progress must not go backwards: {seen:?}"
+        );
+        assert!(seen.first() < Some(&20), "should start dim: {seen:?}");
+        assert!(
+            seen.last() >= Some(&80),
+            "should be nearly full before opening: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn slot_hold_reports_progress_toward_the_destructive_clear() {
+        let mut c = menu();
+        c.update(10_000, SLOT_KEYS[1]);
+        match c.update(11_500, SLOT_KEYS[1]).menu {
+            Menu::Holding { slot, progress } => {
+                assert_eq!(slot, 1);
+                assert_eq!(progress, 50);
+            }
+            other => panic!("expected Holding, got {other:?}"),
+        }
+        // Still only a select at 2.9s, but the progress says "nearly there".
+        assert_eq!(c.update(12_900, 0).action, Some(Action::Select(1)));
+    }
+
+    #[test]
+    fn held_slot_shifts_amber_to_red_as_the_clear_approaches() {
+        let at = |p: u8| {
+            menu_colors(
+                [false, false, false],
+                0,
+                Menu::Holding {
+                    slot: 1,
+                    progress: p,
+                },
+                0,
+            )[1]
+        };
+        let start = at(0);
+        let end = at(100);
+        assert!(start[1] > 40, "starts with real amber-green: {start:?}");
+        assert!(end[1] == 0, "green fully drained at full: {end:?}");
+        assert!(
+            end[0] > start[0],
+            "red climbs toward the destructive end: {start:?} -> {end:?}"
+        );
+        // Monotonic in both channels so the ramp reads as continuous.
+        let mut prev = at(0);
+        for p in 1..=100 {
+            let cur = at(p);
+            assert!(cur[0] >= prev[0], "red must not dip at {p}: {cur:?}");
+            assert!(cur[1] <= prev[1], "green must not rise at {p}: {cur:?}");
+            prev = cur;
+        }
+        // A non-held slot keeps its own status color while another is held.
+        assert_eq!(
+            menu_colors(
+                [false, false, true],
+                0,
+                Menu::Holding {
+                    slot: 1,
+                    progress: 100
+                },
+                100
+            )[2],
+            [0, 100, 0]
+        );
+    }
+
+    #[test]
+    fn plus_key_fills_brighter_as_the_hold_builds() {
+        let start = enter_fill(0);
+        let end = enter_fill(100);
+        assert_eq!(start, [25, 25, 25]);
+        assert_eq!(end, [120, 120, 120]);
+        assert!(
+            start[0] > 0,
+            "visible even at zero progress, backlight may be off"
+        );
+        assert!(end[0] > start[0]);
+        assert_eq!(start[0], start[1]);
+        assert_eq!(start[1], start[2], "neutral white, not a status color");
     }
 }

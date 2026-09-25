@@ -1,0 +1,58 @@
+name: Release
+
+# Tag a commit `vX.Y.Z` and push the tag to publish a release with the BOOTSEL
+# image attached. Nothing here runs on a normal push.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # softprops/action-gh-release creates the release and uploads
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Install picotool
+        uses: ./.github/actions/setup-picotool
+
+      # Gate the release on the same checks CI runs. A tag is not a reason to ship
+      # something that would fail `just check`.
+      - name: just check
+        run: just check
+
+      - name: just build
+        run: just build
+
+      - name: Build UF2
+        run: |
+          just uf2
+          picotool info firmware/target/pico-numpad.uf2
+
+      # Ship the ELF alongside the UF2 on purpose. defmt indexes its log string
+      # table per build, so decoding RTT output from a device requires the exact
+      # ELF that produced it. Without it, a released UF2 is a black box.
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp firmware/target/pico-numpad.uf2 "release/pico-numpad-${GITHUB_REF_NAME}.uf2"
+          cp firmware/target/thumbv8m.main-none-eabihf/release/pico-numpad \
+             "release/pico-numpad-${GITHUB_REF_NAME}.elf"
+          ls -la release
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          make_latest: true
+          generate_release_notes: true

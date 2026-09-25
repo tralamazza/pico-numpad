@@ -6,10 +6,10 @@ on:
 
 jobs:
   check:
-    name: Lint and host tests
+    name: Lint, host tests, ship image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the compiler, the thumbv8m target and the
       # rustfmt/clippy components, and rustup installs them on first use. The pin
@@ -34,3 +34,23 @@ jobs:
 
       - name: Report image size
         run: just size
+
+      - name: Install picotool
+        uses: ./.github/actions/setup-picotool
+
+      # Produce the BOOTSEL image and assert its family ID in the log. The family
+      # is what the RP2350 bootloader matches on; an image tagged for another chip
+      # is refused at flash time, so catching that here is cheaper than finding it
+      # on a board.
+      - name: Build UF2
+        run: |
+          just uf2
+          picotool info firmware/target/pico-numpad.uf2
+
+      - name: Upload UF2
+        uses: actions/upload-artifact@v7
+        with:
+          name: pico-numpad-uf2-${{ github.sha }}
+          path: firmware/target/pico-numpad.uf2
+          if-no-files-found: error
+          retention-days: 30

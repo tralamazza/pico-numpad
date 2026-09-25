@@ -1,0 +1,58 @@
+name: setup-picotool
+description: >
+  Provide picotool for ELF -> UF2 conversion.
+
+  Not installable from apt on the runner: picotool is absent from the Ubuntu
+  noble and jammy universe indexes (verified against the archived Packages.gz
+  files), and the upstream GitHub release ships a source tarball only. So it is
+  built here and cached. The build is ~10s once the SDK is on disk.
+
+  elf2uf2-rs is NOT a substitute. It is installable via cargo, but 2.2.0 stamps
+  output with the RP2040 family ID and exposes no flag to override it; the
+  RP2350 BOOTSEL checks that field, so its images are the wrong family.
+
+inputs:
+  version:
+    description: picotool git tag to build.
+    default: "2.3.1"
+  pico-sdk-version:
+    description: >
+      pico-sdk git tag. picotool 2.x requires PICO_SDK_PATH at configure time
+      even for `uf2 convert`. A shallow clone is ~28 MB and no submodules are
+      needed for conversion (only signing/hashing wants mbedtls).
+    default: "2.1.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Restore cached picotool
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.local/picotool
+        key: ${{ runner.os }}-picotool-${{ inputs.version }}-sdk${{ inputs.pico-sdk-version }}
+
+    - name: Build and install picotool
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake pkg-config libusb-1.0-0-dev
+
+        git clone --depth 1 --branch "${{ inputs.pico-sdk-version }}" \
+          https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
+        git clone --depth 1 --branch "${{ inputs.version }}" \
+          https://github.com/raspberrypi/picotool.git "$RUNNER_TEMP/picotool-src"
+
+        export PICO_SDK_PATH="$RUNNER_TEMP/pico-sdk"
+        cmake -S "$RUNNER_TEMP/picotool-src" -B "$RUNNER_TEMP/picotool-build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$HOME/.local/picotool"
+        cmake --build "$RUNNER_TEMP/picotool-build" -j "$(nproc)"
+        cmake --install "$RUNNER_TEMP/picotool-build"
+
+    - name: Put picotool on PATH
+      shell: bash
+      run: echo "$HOME/.local/picotool/bin" >> "$GITHUB_PATH"

@@ -50,9 +50,23 @@ jobs:
              "release/pico-numpad-${GITHUB_REF_NAME}.elf"
           ls -la release
 
+      # Compose the body from the annotated tag plus a changelog link. Do NOT use
+      # `generate_release_notes: true` -- it replaces the tag annotation instead
+      # of appending to it, which silently dropped the notes explaining the two
+      # assets from the first release.
+      - name: Compose release notes
+        run: |
+          {
+            git fetch --depth=1 origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}"
+            echo
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}"
+          } > "$RUNNER_TEMP/NOTES.md"
+          cat "$RUNNER_TEMP/NOTES.md"
+
       - uses: softprops/action-gh-release@v3
         with:
           files: release/*
+          body_path: ${{ runner.temp }}/NOTES.md
           fail_on_unmatched_files: true
           make_latest: true
-          generate_release_notes: true

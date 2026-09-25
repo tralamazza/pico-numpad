@@ -129,6 +129,7 @@
 
       <div class="bar">
         <button id="connect">Connect</button>
+        <button id="disconnect" class="secondary" disabled>Disconnect</button>
         <button id="reload" class="secondary" disabled>Reload</button>
         <button id="defaults" class="secondary" disabled>Reset defaults</button>
         <button id="save" disabled>Save to flash</button>
@@ -241,9 +242,21 @@
           }
           sel.value = String(code);
         }
-        $("brightness").value = String(raw[18]);
-        $("brightnessValue").textContent = String(raw[18]);
-        $("ledMode").value = String(raw[19]);
+        $("brightness").value = String(Math.min(31, raw[18]));
+        $("brightnessValue").textContent = String($("brightness").value);
+        // A stored LED mode with no matching <option> leaves select.value at "",
+        // and Number("") is 0 -- so any later save would silently rewrite the
+        // device's LED mode to "Off". Synthesise the option instead, exactly as
+        // the keymap selects above do for unknown HID codes.
+        const ledMode = raw[19];
+        const ledSel = $("ledMode");
+        if (![...ledSel.options].some((o) => Number(o.value) === ledMode)) {
+          const opt = document.createElement("option");
+          opt.value = String(ledMode);
+          opt.textContent = `Unknown (${ledMode})`;
+          ledSel.appendChild(opt);
+        }
+        ledSel.value = String(ledMode);
       }
 
       function buildConfig() {
@@ -251,6 +264,10 @@
         for (let i = 0; i < 16; i++) {
           out[2 + i] = Number($(`key${i}`).value) & 0xff;
         }
+        // The range input cannot represent anything outside 0..31, so an
+        // out-of-range stored value is normalised here rather than preserved.
+        // The field is defined as 0..31 (APA102 global brightness), so there is
+        // no valid value this loses.
         out[18] = Number($("brightness").value) & 0xff;
         out[19] = Number($("ledMode").value) & 0xff;
         out[31] = checksum(out);
@@ -321,6 +338,7 @@
       let busy = false;
       function setControls(enabled) {
         $("connect").disabled = !enabled || !!device;
+        $("disconnect").disabled = !enabled || !device;
         $("reload").disabled = !enabled || !device;
         $("defaults").disabled = !enabled || !device;
         $("save").disabled = !enabled || !device;
@@ -361,6 +379,23 @@
       }
 
       $("connect").addEventListener("click", connect);
+      $("disconnect").addEventListener("click", async () => {
+        if (!device) return;
+        // Release the interface and close the handle. Leaving them claimed keeps
+        // the device held by this tab, so another origin (or a reload of this
+        // one) cannot open it until the tab is closed.
+        const dying = device;
+        device = null;
+        setControls(false);
+        $("connect").disabled = false;
+        try {
+          await dying.releaseInterface(IFACE);
+          await dying.close();
+          status("Disconnected.", "ok");
+        } catch (err) {
+          status(`Disconnect error: ${err.message}`, "err");
+        }
+      });
       $("reload").addEventListener("click", () => withBusy(loadConfig));
       $("defaults").addEventListener("click", () => withBusy(resetDefaults));
       $("save").addEventListener("click", () => withBusy(saveConfig));

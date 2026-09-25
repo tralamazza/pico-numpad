@@ -114,6 +114,10 @@ a control it cannot see declared at parse time. The AL application-launch
 usages (`0x18A` Calculator, `0x196` Internet Browser) are excluded for a
 second reason: they are 16-bit and the config stores one byte per key.
 
+Volume, mute and playback controls work on macOS and Linux. Windows is untested.
+`firmware/README.md` explains why the descriptor is shaped the way it is and why
+there is no per-host switch for it.
+
 ## Layout
 
 ```

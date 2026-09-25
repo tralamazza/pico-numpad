@@ -328,6 +328,17 @@ Over BLE the two collections share one report map, as HOGP requires, so
 `REPORT_MAP` is the two USB descriptors concatenated rather than written out a
 third time.
 
+The per-control form is the ordinary HID button encoding (logical 0..1, report
+size 1, variable, absolute), not a macOS-specific workaround. Verified on macOS
+by observing volume change, and on Linux, where volume up/down work. All 16
+declared usages also appear in the mainline `hid-input.c` consumer keymap
+(`0xE9 -> KEY_VOLUMEUP`, `0xCD -> KEY_PLAYPAUSE`, and so on), so nothing we
+advertise is a dead end there. Windows is untested.
+
+On Linux the key event still needs a consumer: a desktop environment binds
+`KEY_VOLUMEUP` by default, a bare console does nothing without a mixer daemon.
+That is host configuration, not the descriptor.
+
 ## Power
 
 ### Keypad interrupt (GP3)

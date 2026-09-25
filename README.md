@@ -52,6 +52,26 @@ Pin map and traced connections: [`firmware/README.md`](firmware/README.md).
 - [`probe-rs`](https://probe.rs) on `PATH`, for flashing and RTT only.
   `just build` works without it.
 
+## Flashing without probe-rs
+
+`just uf2` produces a UF2 image, which the Pico 2 W's BOOTSEL bootloader takes
+directly -- no debug probe and no `probe-rs` needed:
+
+1. Hold `BOOTSEL` while plugging the USB in.
+2. The board appears as a `RP2350` drive.
+3. Drop `firmware/target/pico-numpad.uf2` onto it. The board reboots into the
+   new firmware.
+
+Prebuilt images are attached to each [tagged
+release](https://github.com/tralamazza/pico-numpad/releases), and every CI run
+uploads one as a workflow artifact. Each release also carries the matching
+`.elf`: `defmt` indexes its log string table per build, so decoding RTT output
+from a device needs the exact ELF that produced it.
+
+The UF2 is tagged with the `rp2350-arm-s` family ID, which is what the BOOTSEL
+bootloader matches on. `elf2uf2-rs` cannot produce this -- see the note in
+[`.github/actions/setup-picotool/action.yml`](.github/actions/setup-picotool/action.yml).
+
 ## Commands
 
 ```sh

@@ -22,6 +22,7 @@ use {defmt_rtt as _, panic_probe as _};
 mod backlight;
 mod ble;
 mod config;
+mod config_bus;
 mod config_store;
 mod debounce;
 mod hid;
@@ -76,7 +77,7 @@ async fn main(spawner: Spawner) {
     // --- Config store: last 64 KiB of QSPI flash ---
     let mut flash: config_store::ConfigFlash = Flash::new(p.FLASH, p.DMA_CH2, Irqs);
     if let Some(c) = config_store::load(&mut flash).await {
-        *config::CONFIG.lock().await = c;
+        *config_bus::CONFIG.lock().await = c;
     }
     config_store::init(flash);
     let hosts = match config_store::load_hosts().await {

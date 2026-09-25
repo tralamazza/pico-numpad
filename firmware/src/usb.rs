@@ -31,7 +31,8 @@ use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::StaticCell;
 
-use crate::config::{CONFIG, CONFIG_LEN, Config};
+use crate::config::{CONFIG_LEN, Config};
+use crate::config_bus::CONFIG;
 
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);

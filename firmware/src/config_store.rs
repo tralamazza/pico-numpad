@@ -23,7 +23,8 @@ use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
 use trouble_host::prelude::BondInformation;
 
-use crate::config::{CONFIG, CONFIG_LEN, Config};
+use crate::config::{CONFIG_LEN, Config};
+use crate::config_bus::CONFIG;
 use crate::host_slots::Slots;
 
 /// Total QSPI flash on the Pico 2 W.

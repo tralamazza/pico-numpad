@@ -18,7 +18,8 @@ use embassy_time::{Duration, Instant, Timer, with_timeout};
 use trouble_host::prelude::*;
 
 use crate::backlight::{Backlight, NUM_LEDS};
-use crate::config::{CONFIG, led_mode};
+use crate::config::led_mode;
+use crate::config_bus::CONFIG;
 use crate::config_store::{self, HostSlots};
 use crate::hid::{REPORT_LEN, REPORT_MAP, build_report};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};

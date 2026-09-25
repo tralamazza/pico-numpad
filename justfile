@@ -40,7 +40,8 @@ clippy-host:
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/hid.rs -o /tmp/pico-numpad-hid-clippy \
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/debounce.rs -o /tmp/pico-numpad-debounce-clippy \
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy \
-    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/config.rs -o /tmp/pico-numpad-config-clippy
 
 # All clippy checks.
 lint: clippy clippy-host
@@ -57,7 +58,9 @@ test:
     && rustc --edition={{EDITION}} --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests \
     && /tmp/pico-numpad-recovery-tests \
     && rustc --edition={{EDITION}} --test src/routing.rs -o /tmp/pico-numpad-routing-tests \
-    && /tmp/pico-numpad-routing-tests
+    && /tmp/pico-numpad-routing-tests \
+    && rustc --edition={{EDITION}} --test src/config.rs -o /tmp/pico-numpad-config-tests \
+    && /tmp/pico-numpad-config-tests
 
 # defmt log levels. `release` is the image you ship; `diagnostic` is the bench
 # image. Set here (not only in .cargo/config.toml) so the two profiles stay apart

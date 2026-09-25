@@ -11,6 +11,13 @@
 # which a standalone clippy-driver invocation does not read.
 LINT_FLAGS := "-Dwarnings -F unsafe_code -Wclippy::all -Wclippy::pedantic"
 
+# Edition for the standalone host-module compiles below. Read out of Cargo.toml
+# rather than written out again: those `clippy-driver`/`rustc` invocations bypass
+# Cargo, so they cannot see [package] edition and had it hardcoded on all ten of
+# them. Bumping the edition in Cargo.toml now moves these with it instead of
+# leaving the host build on the old edition silently.
+EDITION := `sed -n 's/^edition = "\([^"]*\)"/\1/p' firmware/Cargo.toml`
+
 # Everything worth running before pushing.
 default: check
 
@@ -29,11 +36,11 @@ clippy:
 # Clippy for the hardware-free modules, compiled standalone like `just test`.
 clippy-host:
     cd firmware \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/host_slots.rs -o /tmp/pico-numpad-slot-clippy \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/hid.rs -o /tmp/pico-numpad-hid-clippy \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/debounce.rs -o /tmp/pico-numpad-debounce-clippy \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy \
-    && clippy-driver --edition=2021 --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/host_slots.rs -o /tmp/pico-numpad-slot-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/hid.rs -o /tmp/pico-numpad-hid-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/debounce.rs -o /tmp/pico-numpad-debounce-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy
 
 # All clippy checks.
 lint: clippy clippy-host
@@ -41,15 +48,15 @@ lint: clippy clippy-host
 # Unit tests for the hardware-free logic (slot controls, HID report builder).
 test:
     cd firmware \
-    && rustc --edition=2021 --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests \
+    && rustc --edition={{EDITION}} --test src/host_slots.rs -o /tmp/pico-numpad-slot-tests \
     && /tmp/pico-numpad-slot-tests \
-    && rustc --edition=2021 --test src/hid.rs -o /tmp/pico-numpad-hid-tests \
+    && rustc --edition={{EDITION}} --test src/hid.rs -o /tmp/pico-numpad-hid-tests \
     && /tmp/pico-numpad-hid-tests \
-    && rustc --edition=2021 --test src/debounce.rs -o /tmp/pico-numpad-debounce-tests \
+    && rustc --edition={{EDITION}} --test src/debounce.rs -o /tmp/pico-numpad-debounce-tests \
     && /tmp/pico-numpad-debounce-tests \
-    && rustc --edition=2021 --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests \
+    && rustc --edition={{EDITION}} --test src/recovery.rs -o /tmp/pico-numpad-recovery-tests \
     && /tmp/pico-numpad-recovery-tests \
-    && rustc --edition=2021 --test src/routing.rs -o /tmp/pico-numpad-routing-tests \
+    && rustc --edition={{EDITION}} --test src/routing.rs -o /tmp/pico-numpad-routing-tests \
     && /tmp/pico-numpad-routing-tests
 
 # defmt log levels. `release` is the image you ship; `diagnostic` is the bench

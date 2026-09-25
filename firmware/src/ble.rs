@@ -430,6 +430,12 @@ impl KeypadUi {
         if let Some(until) = self.controls.next_deadline(now) {
             budget = budget.min(until);
         }
+        // The debouncer needs one more sample ~DEBOUNCE_MS after a transition,
+        // and no interrupt is coming to provide it once the line has gone quiet.
+        // Omitting this is what made presses vanish and keys stick.
+        if let Some(settle) = self.keypad.next_settle(now) {
+            budget = budget.min(settle);
+        }
         if !self.blanked {
             let idle = (self.last_activity + host_slots::LED_IDLE_OFF_MS).saturating_sub(now);
             budget = budget.min(idle);

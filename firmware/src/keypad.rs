@@ -107,6 +107,18 @@ impl<'d> Keypad<'d> {
         Ok(u16::from(buf[0]) | (u16::from(buf[1]) << 8))
     }
 
+    /// Millis until the debouncer needs another sample to settle a pending
+    /// transition, or `None` when every key is stable.
+    ///
+    /// This is not optional for a sleeping reader. The read that clears INT is
+    /// taken too early to settle the transition it was woken by, so without a
+    /// follow-up sample at `since + DEBOUNCE_MS` presses are lost or keys are
+    /// left stuck. See `Debouncer::next_settle`.
+    #[must_use]
+    pub fn next_settle(&self, now: u64) -> Option<u64> {
+        self.debounce.next_settle(now)
+    }
+
     /// Debounced pressed mask (bit set = pressed), shared by every input consumer.
     pub async fn read_pressed(&mut self) -> Result<u16, Error> {
         let raw = !self.read_raw().await?;

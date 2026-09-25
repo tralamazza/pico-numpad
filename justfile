@@ -88,6 +88,17 @@ size:
     if command -v arm-none-eabi-size >/dev/null 2>&1; then SZ=arm-none-eabi-size; else SZ=size; fi; \
     "$SZ" "$BIN" | awk 'NR==2 {printf "ship image: %d bytes flash (text+data) of the 4032K region, %d bytes ram (bss)\n", $1+$2, $3}'
 
+# Serve the WebUSB editor locally.
+#
+# The deployed copy is on GitHub Pages -- see .github/workflows/pages.yml; the
+# firmware's landing_url in usb.rs points there, so the browser nudge opens the
+# real page. Use this instead when iterating on the editor without deploying, or
+# with no network. WebUSB treats http://localhost as a secure context, so the
+# editor behaves the same either way -- but note the browser grants USB access
+# per origin, so localhost and the Pages site each need their own one-time grant.
+serve:
+    python3 -m http.server 8080 --bind 127.0.0.1 --directory web
+
 # --------------------------------------------------------------------------
 # Storage safety net.
 #

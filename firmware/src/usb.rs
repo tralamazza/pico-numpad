@@ -143,7 +143,7 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let webusb_config = WEBUSB_CONFIG.init(WebUsbConfig {
         max_packet_size: MAX_PACKET,
         vendor_code: 1,
-        landing_url: Some(Url::new("http://localhost:8080")),
+        landing_url: Some(Url::new("https://tralamazza.github.io/pico-numpad/")),
     });
 
     let mut config = UsbConfig::new(VID, PID);

@@ -104,15 +104,18 @@ The editor keeps its existing vendor interfaces and bulk endpoints.
 
 1. Connect the Pico's own USB port to the computer with a data-capable cable.
    The debug probe's USB connection alone does not expose the configurator.
-2. From the repository root, serve the editor:
+2. Open <https://tralamazza.github.io/pico-numpad/> in Chrome or Edge. The
+   browser's "pico-numpad detected" notification points at this page: the
+   firmware advertises it as its WebUSB landing URL in the BOS descriptor, which
+   is what makes that notification appear when the device enumerates.
 
-   ```sh
-   python3 -m http.server 8080 --bind 127.0.0.1 --directory web
-   ```
+   For local iteration without deploying, run `just serve` and open
+   <http://localhost:8080>. Either way the page must come from a secure context
+   -- HTTPS or localhost -- never a `file://` URL, because WebUSB requires one.
 
-3. Open <http://localhost:8080> in Chrome or Edge. Use localhost (or HTTPS when
-   hosting elsewhere), not a `file://` URL; the editor requires a secure context.
-4. Click **Connect** and select **pico-numpad** in the browser's USB picker.
+3. Click **Connect** and select **pico-numpad** in the browser's USB picker.
+   The browser grants USB access per origin, so the Pages site and localhost are
+   separate one-time grants; switching where you host it means granting again.
 5. Edit the key mappings, LED mode, or brightness, then click **Save to flash**.
    Wait for **Saved to flash.** before unplugging or restarting the Pico.
 

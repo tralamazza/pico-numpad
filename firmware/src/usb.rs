@@ -14,9 +14,9 @@
 //! All responses are padded to 33 bytes so the host can always read a fixed size.
 //! ```
 
-use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, REPORT_MAP, usb_consumer_report, usb_report};
+use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, usb_consumer_report, usb_report};
 use defmt::{info, warn};
-use embassy_futures::join::join3;
+use embassy_futures::join::{join, join3};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::hid::{
@@ -81,45 +81,61 @@ impl embassy_usb::Handler for UsbEvents {
 
 async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>) {
     let mut last = None;
-    let mut last_consumer = None;
     let mut generation = GENERATION.load(Ordering::Relaxed);
     loop {
         let current = GENERATION.load(Ordering::Relaxed);
         if generation != current || !keyboard_active() {
             last = None;
-            last_consumer = None;
             generation = current;
         }
         if keyboard_active() {
             let (report_generation, value) = *KEY_REPORT.lock().await;
-            let (consumer_generation, consumer_value) = *CONSUMER_REPORT.lock().await;
             // Never replay a report from before reset, unconfigure, or suspend.
             let report = if report_generation == current {
                 value
             } else {
                 [0; REPORT_LEN]
             };
-            let consumer = if consumer_generation == current {
-                consumer_value
-            } else {
-                [0; CONSUMER_REPORT_LEN]
-            };
-            // One endpoint carries both report types; the ID prefixed onto the
-            // payload is what tells the host which collection it belongs to.
             if last != Some(report)
                 && let Ok(Ok(())) =
                     with_timeout(Duration::from_millis(20), writer.write(&usb_report(report))).await
             {
                 last = Some(report);
             }
-            if last_consumer != Some(consumer)
+        }
+        Timer::after_millis(5).await;
+    }
+}
+
+/// The consumer report goes out on its own HID interface, not the keyboard's.
+///
+/// Same generation and suspend discipline as [`keyboard_loop`], but a separate
+/// task with a separate writer: the two interfaces are separate devices to the
+/// host, so neither may hold up the other.
+async fn consumer_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 3>) {
+    let mut last = None;
+    let mut generation = GENERATION.load(Ordering::Relaxed);
+    loop {
+        let current = GENERATION.load(Ordering::Relaxed);
+        if generation != current || !keyboard_active() {
+            last = None;
+            generation = current;
+        }
+        if keyboard_active() {
+            let (consumer_generation, consumer_value) = *CONSUMER_REPORT.lock().await;
+            let consumer = if consumer_generation == current {
+                consumer_value
+            } else {
+                [0; CONSUMER_REPORT_LEN]
+            };
+            if last != Some(consumer)
                 && let Ok(Ok(())) = with_timeout(
                     Duration::from_millis(20),
                     writer.write(&usb_consumer_report(consumer)),
                 )
                 .await
             {
-                last_consumer = Some(consumer);
+                last = Some(consumer);
             }
         }
         Timer::after_millis(5).await;
@@ -156,6 +172,7 @@ struct Endpoints<'d, D: Driver<'d>> {
 /// Run the composite USB device, configuration protocol, and keyboard writer.
 pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     static HID_STATE: StaticCell<HidState<'static>> = StaticCell::new();
+    static CONSUMER_HID_STATE: StaticCell<HidState<'static>> = StaticCell::new();
     static EVENTS: StaticCell<UsbEvents> = StaticCell::new();
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
@@ -233,7 +250,22 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
         &mut builder,
         HID_STATE.init(HidState::new()),
         HidConfig {
-            report_descriptor: REPORT_MAP,
+            report_descriptor: crate::hid::KEYBOARD_REPORT_MAP,
+            request_handler: None,
+            poll_ms: 5,
+            max_packet_size: 16,
+            hid_subclass: HidSubclass::No,
+            hid_boot_protocol: HidBootProtocol::None,
+        },
+    );
+    // A second HID interface carrying only the consumer collection. See the
+    // note on KEYBOARD_REPORT_MAP for why sharing the keyboard's interface
+    // leaves media keys dead on macOS.
+    let consumer = HidWriter::<_, 3>::new(
+        &mut builder,
+        CONSUMER_HID_STATE.init(HidState::new()),
+        HidConfig {
+            report_descriptor: crate::hid::CONSUMER_REPORT_MAP,
             request_handler: None,
             poll_ms: 5,
             max_packet_size: 16,
@@ -244,7 +276,12 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let mut usb = builder.build();
     let mut ep: Endpoints<'static, D> = Endpoints { write_ep, read_ep };
 
-    join3(usb.run(), protocol_loop(&mut ep), keyboard_loop(keyboard)).await;
+    join3(
+        usb.run(),
+        protocol_loop(&mut ep),
+        join(keyboard_loop(keyboard), consumer_loop(consumer)),
+    )
+    .await;
     loop {
         embassy_time::Timer::after_millis(1000).await;
     }

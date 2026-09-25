@@ -24,6 +24,7 @@ Needs a Chromium-family browser; Brave, Chrome and Chromium are looked for.
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -185,7 +186,43 @@ def free_port() -> int:
     return port
 
 
+def check_media_key_lists_agree() -> None:
+    """The firmware's consumer descriptor is generated from CONSUMER_KEYS, so a
+    media key the editor offers that is not in that list has no bit in the
+    report and silently does nothing. Nothing in the type system or the build
+    connects the Rust table to the JavaScript one, so check it here."""
+    hid = (ROOT / "firmware" / "src" / "hid.rs").read_text()
+    m = re.search(r"pub const CONSUMER_KEYS: \[u8; (\d+)\] = \[(.*?)\n\];", hid, re.S)
+    if not m:
+        sys.exit("could not find CONSUMER_KEYS in firmware/src/hid.rs")
+    declared_len = int(m.group(1))
+    body = re.sub(r"//[^\n]*", "", m.group(2))
+    fw = [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", body)]
+    if len(fw) != declared_len:
+        sys.exit(f"CONSUMER_KEYS declares {declared_len} entries but has {len(fw)}")
+    if len(set(fw)) != len(fw):
+        sys.exit("CONSUMER_KEYS has duplicate entries")
+
+    app = (ROOT / "web" / "app.js").read_text()
+    m2 = re.search(r"const MEDIA_KEYS = \[(.*?)\n\];", app, re.S)
+    if not m2:
+        sys.exit("could not find MEDIA_KEYS in web/app.js")
+    web = [int(x, 16) for x in re.findall(r"\[0x([0-9a-fA-F]{2})", m2.group(1))]
+
+    only_fw = sorted(f"0x{c:02x}" for c in set(fw) - set(web))
+    only_web = sorted(f"0x{c:02x}" for c in set(web) - set(fw))
+    if only_fw or only_web:
+        sys.exit(
+            "media key lists disagree -- firmware-only=%s editor-only=%s. "
+            "A key the editor offers but the firmware does not declare cannot "
+            "work; a key declared but not offered is dead weight."
+            % (only_fw, only_web)
+        )
+    print(f"  PASS  firmware and editor offer the same {len(set(fw))} media keys")
+
+
 def main() -> int:
+    check_media_key_lists_agree()
     browser = find_browser()
 
     with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,51 @@
+name: Pages
+
+# Publish the WebUSB config editor. It is a single self-contained HTML file with
+# no build step, so "build" is just staging `web/` and deploy pushes it to Pages.
+#
+# This exists so the firmware's WebUSB landing_url can point at something that is
+# always up. WebUSB requires a secure context; Pages serves HTTPS, so the
+# browser's "pico-numpad detected" notification resolves without anyone having
+# to run `just serve` locally.
+#
+# Note the browser grants USB access per origin, so a grant given to
+# http://localhost:8080 does not carry over to the Pages origin. Each origin
+# needs its own one-time grant.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Deploy is the only thing that touches Pages, so serialise runs rather than
+# letting two pushes race to publish.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Stage the editor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/configure-pages@v6
+
+      # Upload `web/` as the site root, so web/index.html lands at / and the
+      # editor is reachable at the bare Pages URL rather than /web/.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: web
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v5

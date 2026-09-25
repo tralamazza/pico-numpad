@@ -328,9 +328,44 @@ Idle measured over a 43 s window: 44 wakes, all `Timeout`. During typing,
 Not measured: absolute current. There is no meter on the bench, so the wake-rate
 reduction is stated and no milliamp figure is implied.
 
-Still open: `cyw43` power management is never configured (the crate defaults to
-`PowerSave`; `Aggressive` is available), and the BLE advertising intervals are
-untuned.
+### Advertisement rate
+
+While disconnected the pad advertises at 160 ms for about 30 s after boot or a
+link drop, then settles to 800 ms -- a fifth of the advertisement events, for a
+second or two of extra reconnect latency. An unbonded slot never settles,
+because someone is actively trying to pair with it. The fast window resets on
+every accepted connection. The decision lives in `host_slots::advertise_fast`.
+
+### Two levers that turned out not to be levers
+
+Both of these were listed as candidates before being checked, and both are wrong.
+Recorded so nobody spends a session on them again.
+
+**`cyw43::set_power_management` does nothing useful here.** `PowerManagementMode`
+looks like the obvious knob, but `Aggressive` sets `pm2_sleep_ret`, `bcn_li_bcn`,
+`bcn_li_dtim` and `assoc_listen` -- 802.11 *station* power saving, which governs
+how often the WiFi radio wakes to catch beacons and DTIM traffic from an
+associated access point. This firmware never brings the WiFi interface up: it uses
+`new_with_bluetooth` for the `BtDriver` only, and the `NetDriver` and its
+`Control` are unused. There is no AP, no beacon stream and no DTIM, so the ioctl
+has nothing to act on. The cyw43 crate exposes no Bluetooth-specific power knob.
+BLE power is governed by the link layer itself -- connection interval, slave
+latency and advertising interval -- not by this call.
+
+**Turning BLE off while USB is connected saves no battery.** When USB is plugged
+in, VBUS is present and the Pico powers from it, so the battery is not being
+drained in the first place. The battery case is BLE-only operation, where USB is
+absent by definition -- so the change cannot help in the case that matters. It
+would only avoid work the USB supply is already paying for, while adding a
+resume-on-unplug path that can fail. Not implemented.
+
+### What is actually left
+
+The connected-BLE idle path. The negotiated link runs at interval 15 ms with
+slave latency 22, so the radio wakes about every 345 ms while idle. Requesting a
+longer interval when nothing is happening would stretch that, at the cost of
+latency on the first keypress after idle. Whether a host grants it is another
+question -- macOS has its own preferences about connection parameters.
 
 ## Storage
 

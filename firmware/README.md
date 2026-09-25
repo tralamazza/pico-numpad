@@ -330,14 +330,22 @@ third time.
 
 The per-control form is the ordinary HID button encoding (logical 0..1, report
 size 1, variable, absolute), not a macOS-specific workaround. Verified on macOS
-by observing volume change, and on Linux, where volume up/down work. All 16
-declared usages also appear in the mainline `hid-input.c` consumer keymap
+by observing volume change, and on Linux, where volume up/down work. Every
+declared usage also appears in the mainline `hid-input.c` consumer keymap
 (`0xE9 -> KEY_VOLUMEUP`, `0xCD -> KEY_PLAYPAUSE`, and so on), so nothing we
 advertise is a dead end there. Windows is untested.
 
 On Linux the key event still needs a consumer: a desktop environment binds
 `KEY_VOLUMEUP` by default, a bare console does nothing without a mixer daemon.
 That is host configuration, not the descriptor.
+
+`0x30` System Power Down and `0x32` System Sleep are deliberately **not**
+offered, even though both are valid and both are mapped by every OS. They are
+real shutdown/sleep events with no confirmation step, which makes a numpad key
+one slot from volume a way to kill a laptop by accident. They were removed from
+the end of `CONSUMER_KEYS` so mask bits 0..13 keep their meaning and existing
+configs are unaffected; a config that had Power assigned now goes inert rather
+than leaking a keystroke.
 
 ## Power
 

@@ -108,7 +108,7 @@ and sleep. Media keys are reported on the Consumer page (`0x0C`) instead of the
 keyboard page, so they reach the operating system's media handling rather than
 typing a character.
 
-Sixteen controls are available, not any consumer usage. The set is fixed by the
+Fourteen controls are available, not any consumer usage. The set is fixed by the
 HID descriptor, which declares each control individually — macOS will not route
 a control it cannot see declared at parse time. The AL application-launch
 usages (`0x18A` Calculator, `0x196` Internet Browser) are excluded for a

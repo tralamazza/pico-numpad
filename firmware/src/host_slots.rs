@@ -11,6 +11,23 @@ pub const MENU_HOLD_MS: u64 = 3_000;
 pub const CLEAR_HOLD_MS: u64 = 3_000;
 const MENU_TIMEOUT_MS: u64 = 10_000;
 
+/// Blank the backlight after this long with no key activity.
+///
+/// The 16 APA102s are the largest single consumer on the board -- full white is
+/// on the order of 700mA, well above the whole BLE link -- so switching them off
+/// outright when nobody is using the pad is the biggest power lever available.
+pub const LED_IDLE_OFF_MS: u64 = 60_000;
+
+/// Whether the backlight may blank.
+///
+/// An open menu suppresses blanking. Blanking mid-gesture would hide exactly the
+/// hold-progress feedback the user is relying on, and the hold can outlast the idle
+/// timeout while a key is deliberately being held down for three seconds.
+#[must_use]
+pub fn backlight_blank(now: u64, last_activity: u64, menu: Menu) -> bool {
+    menu == Menu::Closed && now.saturating_sub(last_activity) >= LED_IDLE_OFF_MS
+}
+
 #[cfg_attr(not(test), derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Slots<B> {
@@ -642,5 +659,43 @@ mod tests {
             start[0] > 0,
             "visible even at zero progress, backlight may be off"
         );
+    }
+
+    #[test]
+    fn backlight_blanks_only_after_the_idle_timeout() {
+        let t = LED_IDLE_OFF_MS;
+        assert!(!backlight_blank(0, 0, Menu::Closed));
+        assert!(!backlight_blank(t - 1, 0, Menu::Closed));
+        assert!(backlight_blank(t, 0, Menu::Closed));
+        assert!(backlight_blank(t * 10, 0, Menu::Closed));
+        // Measured from the last activity, not from boot: a press at t/2 pushes
+        // the blank out to 3t/2.
+        assert!(!backlight_blank(t, t / 2, Menu::Closed));
+        assert!(backlight_blank(t + t / 2, t / 2, Menu::Closed));
+    }
+
+    #[test]
+    fn an_open_menu_never_blanks_mid_gesture() {
+        let t = LED_IDLE_OFF_MS + 9_999;
+        // Every non-Closed menu state suppresses blanking: a three-second hold can
+        // outlast the idle timeout, and blanking then would hide the progress fill.
+        assert!(!backlight_blank(t, 0, Menu::Open));
+        assert!(!backlight_blank(t, 0, Menu::Entering(50)));
+        assert!(!backlight_blank(
+            t,
+            0,
+            Menu::Holding {
+                slot: 1,
+                progress: 100
+            }
+        ));
+        // Only a closed menu may blank.
+        assert!(backlight_blank(t, 0, Menu::Closed));
+    }
+
+    #[test]
+    fn backlight_blank_saturates_on_a_clock_that_went_backwards() {
+        assert!(!backlight_blank(1_000, 5_000, Menu::Closed));
+        assert!(!backlight_blank(0, u64::MAX, Menu::Closed));
     }
 }

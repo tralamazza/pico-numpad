@@ -245,6 +245,25 @@ All physical keys are independently debounced for 20 ms before typing or menu
 handling. Disabled mappings do not consume HID report entries, and duplicate
 mappings share one entry until all physical keys mapped to that usage are released.
 
+### Backlight idle blank
+
+The backlight turns itself off after **one minute with no key press** and comes
+back on the next press. The 16 APA102s are the largest single consumer on the
+board -- full white is on the order of 700mA, well above the entire BLE link -- so
+switching them off completely when the pad is unused is the biggest power lever
+available.
+
+Management feedback is exempt and never blanks mid-gesture: the host menu, the
+`+` hold fill, the slot-hold ramp, and the recovery display all stay lit
+regardless of the idle timer. That matters because a deliberate three-second hold
+can outlast the idle timeout, and blanking then would hide exactly the feedback
+you are watching. The exemption is enforced by `backlight_blank`, which returns
+false for any non-closed menu state.
+
+The timeout is `LED_IDLE_OFF_MS` in `host_slots.rs`. It is a constant rather than
+a config field so this change did not touch the 32-byte config record or the
+WebUSB editor; the record has spare bytes if you want it user-configurable later.
+
 ### HID compatibility / upgrading
 
 The keyboard supports **Report Protocol Mode only** and no longer exposes the

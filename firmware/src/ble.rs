@@ -169,6 +169,7 @@ pub async fn run<C: Controller>(
         router: crate::routing::Router::default(),
         last_leds: None,
         last_brightness: 0,
+        last_activity: 0,
     };
     info!(
         "BLE host slot {}: bonded={}",
@@ -405,6 +406,8 @@ struct KeypadUi {
     router: crate::routing::Router,
     last_leds: Option<[[u8; 3]; NUM_LEDS]>,
     last_brightness: u8,
+    /// Timestamp of the most recent key press. Drives the idle backlight blank.
+    last_activity: u64,
 }
 
 impl KeypadUi {
@@ -423,6 +426,9 @@ impl KeypadUi {
         let pressed = self.keypad.read_pressed().await.ok()?;
         let now = Instant::now().as_millis();
         let mut input = self.controls.update(now, pressed);
+        if pressed != 0 {
+            self.last_activity = now;
+        }
         let usb_active = crate::usb::keyboard_active();
         let (usb_keys, ble_keys) = self.router.update(input.keys, usb_active, connected);
         crate::usb::publish_report(build_report(usb_keys, &CONFIG.lock().await.keymap)).await;
@@ -433,6 +439,7 @@ impl KeypadUi {
             (cfg.led_mode, cfg.brightness)
         };
         let mut leds = [[0; 3]; NUM_LEDS];
+        let blank = host_slots::backlight_blank(now, self.last_activity, input.menu);
         if input.menu != Menu::Closed {
             // Management feedback must be readable regardless of the user's
             // backlight setting. The old floor of 8 (~26% on the APA102's 0..31
@@ -458,7 +465,7 @@ impl KeypadUi {
                 // registered and that they should keep pressing.
                 leds[host_slots::PLUS.trailing_zeros() as usize] = host_slots::enter_fill(progress);
             }
-        } else if mode != led_mode::OFF {
+        } else if mode != led_mode::OFF && !blank {
             for (i, led) in leds.iter_mut().enumerate() {
                 *led = if connected {
                     if pressed & (1 << i) != 0 {

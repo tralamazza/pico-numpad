@@ -7,406 +7,316 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #111418;
-        --panel: #1b2026;
-        --line: #2c343d;
-        --text: #e8edf2;
-        --muted: #9aa7b4;
+        --bg: #0d1013;
+        --panel: #171c22;
+        --panel-2: #1e242b;
+        --line: #2b333c;
+        --line-soft: #222a32;
+        --text: #e9eef3;
+        --muted: #8f9dab;
         --accent: #4cc2ff;
-        --ok: #58d68d;
+        --accent-ink: #061018;
+        --ok: #4fd58b;
         --err: #ff6b6b;
+        --warn: #f0b429;
+        --sel: #2b6cb0;
       }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 24px;
+        padding: 20px 16px 64px;
         background: var(--bg);
         color: var(--text);
-        font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif;
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
       }
-      main {
-        max-width: 820px;
-        margin: 0 auto;
-      }
-      h1 {
-        margin: 0 0 8px;
-        font-size: 22px;
-      }
-      .sub {
-        color: var(--muted);
-        margin-bottom: 18px;
-      }
-      .bar {
+      main { max-width: 980px; margin: 0 auto; }
+
+      header {
         display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
         align-items: center;
-        margin-bottom: 16px;
-      }
-      button,
-      select,
-      input[type="range"] {
-        font: inherit;
-      }
-      button {
-        background: var(--accent);
-        color: #061018;
-        border: 0;
-        border-radius: 8px;
-        padding: 8px 12px;
-        cursor: pointer;
-      }
-      button.secondary {
-        background: #39434e;
-        color: var(--text);
-      }
-      button:disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-      #status {
-        min-height: 20px;
-        color: var(--muted);
-      }
-      #status.ok {
-        color: var(--ok);
-      }
-      #status.err {
-        color: var(--err);
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(120px, 1fr));
-        gap: 10px;
-        margin: 18px 0;
-      }
-      .cell {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 10px;
-      }
-      .cell label {
-        display: block;
-        color: var(--muted);
-        margin-bottom: 6px;
-      }
-      .cell select {
-        width: 100%;
-        background: #12171c;
-        color: var(--text);
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 6px;
-      }
-      .settings {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        justify-content: space-between;
         gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 4px;
+      }
+      h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); margin: 2px 0 16px; font-size: 13px; }
+
+      /* ---- connection chip ---- */
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 11px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
         background: var(--panel);
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--muted); flex: none;
+      }
+      .chip.on { border-color: #1f5c3d; color: #b9f0d2; }
+      .chip.on .dot { background: var(--ok); box-shadow: 0 0 0 3px #4fd58b22; }
+      .chip.err { border-color: #5c2323; color: #ffc9c9; }
+      .chip.err .dot { background: var(--err); }
+
+      /* ---- toolbar ---- */
+      .bar {
+        display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        padding: 12px; margin-bottom: 14px;
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .bar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+      .spacer { flex: 1 1 auto; }
+      button {
+        font: inherit; font-size: 13px;
+        background: var(--accent); color: var(--accent-ink);
+        border: 0; border-radius: 8px; padding: 8px 13px;
+        cursor: pointer; font-weight: 600;
+        transition: filter .12s ease, opacity .12s ease;
+      }
+      button:hover:not(:disabled) { filter: brightness(1.12); }
+      button.secondary { background: #39434e; color: var(--text); font-weight: 500; }
+      button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+      button.danger { background: #7f2d2d; color: #ffe3e3; font-weight: 500; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button.dirty { box-shadow: 0 0 0 2px #f0b42955; }
+
+      .badge {
+        display: none; align-items: center; gap: 6px;
+        font-size: 12px; color: var(--warn); font-weight: 600;
+      }
+      .badge.show { display: inline-flex; }
+
+      /* ---- layout ---- */
+      .cols {
+        display: grid;
+        grid-template-columns: minmax(300px, 380px) 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 780px) { .cols { grid-template-columns: 1fr; } }
+
+      .card {
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 12px; padding: 14px;
+      }
+      .card + .card { margin-top: 14px; }
+      .card h2 {
+        margin: 0 0 3px; font-size: 13px; font-weight: 650;
+        text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+      }
+      .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+      /* ---- numpad ---- */
+      .pad {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+      }
+      .key {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 3px;
+        background: var(--panel-2);
         border: 1px solid var(--line);
         border-radius: 10px;
-        padding: 12px;
+        cursor: pointer;
+        padding: 4px;
+        transition: border-color .12s ease, background .12s ease, transform .06s ease;
+        text-align: center;
+        user-select: none;
       }
-      .field {
-        display: grid;
-        gap: 6px;
+      .key:hover { border-color: #3f4c59; background: #232a32; }
+      .key:active { transform: scale(0.98); }
+      .key.sel {
+        border-color: var(--accent);
+        background: #14212c;
+        box-shadow: 0 0 0 2px #4cc2ff33;
       }
-      .field span {
-        color: var(--muted);
+      .key .phys {
+        font-size: 11px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em;
       }
-      code {
-        color: #d7e2ec;
+      .key .assign {
+        font-size: 14px; font-weight: 650; color: var(--text);
+        line-height: 1.15;
       }
+      .key .assign.none { color: #5c6875; font-weight: 500; }
+      .key .code {
+        position: absolute; top: 4px; right: 6px;
+        font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #55636f;
+      }
+      .key.changed { border-color: #6b5a20; }
+      .key.changed::after {
+        content: ""; position: absolute; top: 5px; left: 6px;
+        width: 6px; height: 6px; border-radius: 50%; background: var(--warn);
+      }
+
+      /* ---- assignment panel ---- */
+      input[type="search"], input[type="text"], select {
+        font: inherit; font-size: 13px;
+        background: #10151a; color: var(--text);
+        border: 1px solid var(--line); border-radius: 8px;
+        padding: 8px 10px; width: 100%;
+      }
+      input:focus, select:focus, button:focus-visible {
+        outline: 2px solid var(--accent); outline-offset: 1px;
+      }
+      .capture {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px; margin-bottom: 10px;
+        border: 1px dashed var(--accent); border-radius: 10px;
+        background: #10202b; color: #bfe4ff; font-size: 13px;
+      }
+      .capture.idle { border-color: var(--line); background: var(--panel-2); color: var(--muted); }
+      kbd {
+        font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: #0b0f13; border: 1px solid var(--line);
+        border-bottom-width: 2px; border-radius: 5px; padding: 2px 6px;
+      }
+      .groups { display: grid; gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 4px; }
+      .group h3 {
+        margin: 0 0 5px; font-size: 11px; text-transform: uppercase;
+        letter-spacing: 0.06em; color: var(--muted); font-weight: 600;
+      }
+      .keys { display: flex; flex-wrap: wrap; gap: 5px; }
+      .pick {
+        font: inherit; font-size: 12px;
+        background: var(--panel-2); color: var(--text);
+        border: 1px solid var(--line); border-radius: 7px;
+        padding: 5px 9px; cursor: pointer;
+        display: inline-flex; align-items: baseline; gap: 6px;
+      }
+      .pick:hover { border-color: var(--accent); background: #1a252e; }
+      .pick code { font-size: 10px; color: #6b7885; }
+      .pick.active { border-color: var(--ok); background: #14291f; }
+      .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+
+      /* ---- settings ---- */
+      .field { display: grid; gap: 6px; margin-bottom: 14px; }
+      .field:last-child { margin-bottom: 0; }
+      .field > label { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; }
+      input[type="range"] { width: 100%; accent-color: var(--accent); }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 460px) { .row { grid-template-columns: 1fr; } }
+
+      /* ---- toast ---- */
+      #toasts {
+        position: fixed; right: 16px; bottom: 16px; z-index: 50;
+        display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+      }
+      .toast {
+        padding: 10px 14px; border-radius: 10px; font-size: 13px;
+        background: var(--panel-2); border: 1px solid var(--line);
+        box-shadow: 0 8px 24px #00000066;
+        animation: rise .18s ease;
+      }
+      .toast.ok { border-color: #1f5c3d; background: #12241c; color: #c4f2d9; }
+      .toast.err { border-color: #5c2323; background: #241414; color: #ffd0d0; }
+      .toast.warn { border-color: #5c4820; background: #241e10; color: #ffe6bb; }
+      @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
+      code.inline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #cfdbe6; }
+      .foot { margin-top: 18px; color: #66737f; font-size: 12px; }
+      .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
     </style>
   </head>
   <body>
     <main>
-      <h1>pico-numpad config</h1>
-      <div class="sub">
-        Remap the 16 keys, set global LED brightness, and save to the keypad's flash.
-        Requires a WebUSB browser (Chrome/Edge) served from <code>localhost</code> or HTTPS.
-      </div>
+      <header>
+        <div>
+          <h1>pico-numpad config</h1>
+          <div class="sub">
+            Remap the 16 keys, set LED brightness, save to the keypad's flash.
+            Chrome or Edge, served over HTTPS or localhost.
+          </div>
+        </div>
+        <div class="chip" id="chip"><span class="dot"></span><span id="chipText">Not connected</span></div>
+      </header>
 
       <div class="bar">
         <button id="connect">Connect</button>
         <button id="disconnect" class="secondary" disabled>Disconnect</button>
-        <button id="reload" class="secondary" disabled>Reload</button>
-        <button id="defaults" class="secondary" disabled>Reset defaults</button>
+        <span class="sep"></span>
+        <button id="reload" class="secondary" disabled>Reload from device</button>
         <button id="save" disabled>Save to flash</button>
+        <span class="badge" id="dirtyBadge"><span class="dot" style="background:var(--warn)"></span><span id="dirtyText">unsaved</span></span>
+        <span class="spacer"></span>
+        <button id="exportBtn" class="ghost" disabled>Export JSON</button>
+        <button id="importBtn" class="ghost" disabled>Import JSON</button>
+        <input type="file" id="importFile" accept="application/json,.json" class="sr" />
+        <button id="defaults" class="danger" disabled>Reset to defaults</button>
       </div>
-      <div id="status">Not connected.</div>
 
-      <div class="grid" id="keys"></div>
+      <div class="cols">
+        <section class="card">
+          <h2>Keypad</h2>
+          <p class="hint">
+            Click a key, then press the key you want on your own keyboard. Or use the
+            list on the right. Labels show the <em>physical</em> key on the pad.
+          </p>
+          <div class="pad" id="pad" role="grid" aria-label="Numpad key layout"></div>
+        </section>
 
-      <div class="settings">
-        <div class="field">
-          <span>Brightness (<span id="brightnessValue">8</span>/31)</span>
-          <input id="brightness" type="range" min="0" max="31" value="8" disabled />
-        </div>
-        <div class="field">
-          <span>LED mode</span>
-          <select id="ledMode" disabled>
-            <option value="0">Off</option>
-            <option value="1" selected>Highlight pressed</option>
-          </select>
-        </div>
+        <section>
+          <div class="card">
+            <h2>Assign</h2>
+            <div class="capture idle" id="capture">
+              <span id="captureMsg">Select a key on the pad to reassign it.</span>
+            </div>
+            <input
+              type="search"
+              id="search"
+              placeholder="Search keys — “f5”, “arrow”, “kp 9”, “0x54”"
+              aria-label="Search key assignments"
+              disabled
+            />
+            <div class="groups" id="groups" style="margin-top: 10px"></div>
+          </div>
+
+          <div class="card">
+            <h2>Device settings</h2>
+            <div class="row">
+              <div class="field">
+                <label for="brightness">
+                  <span>Brightness</span><span id="brightnessValue">8 / 31</span>
+                </label>
+                <input id="brightness" type="range" min="0" max="31" value="8" disabled />
+              </div>
+              <div class="field">
+                <label for="ledMode"><span>LED mode</span></label>
+                <select id="ledMode" disabled>
+                  <option value="0">Off</option>
+                  <option value="1" selected>Highlight pressed keys</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="preset"><span>Preset</span></label>
+              <select id="preset" disabled>
+                <option value="">Load a layout into the grid…</option>
+              </select>
+            </div>
+          </div>
+        </section>
       </div>
+
+      <p class="foot">
+        Changes apply to the device immediately but are only written to flash by
+        <strong>Save to flash</strong>. Power-cycling without saving discards them.
+      </p>
     </main>
 
-    <script>
-      const VENDOR_ID = 0x2e8a;
-      const PRODUCT_ID = 0x000a;
-      const IFACE = 1;
-      // WebUSB transferIn/transferOut take the endpoint *number*, not the USB
-      // endpoint address. Our bulk IN is 0x81 and bulk OUT is 0x01, both number 1.
-      const EP_IN = 1;
-      const EP_OUT = 1;
-      const CONFIG_LEN = 32;
-      const CMD_GET = 0x01;
-      const CMD_SET = 0x02;
-      const CMD_SAVE = 0x03;
-      const CMD_RESET = 0x04;
+    <div id="toasts" aria-live="polite"></div>
 
-      const HID = {
-        0x00: "None",
-        0x04: "A", 0x05: "B", 0x06: "C", 0x07: "D", 0x08: "E", 0x09: "F",
-        0x0a: "G", 0x0b: "H", 0x0c: "I", 0x0d: "J", 0x0e: "K", 0x0f: "L",
-        0x10: "M", 0x11: "N", 0x12: "O", 0x13: "P", 0x14: "Q", 0x15: "R",
-        0x16: "S", 0x17: "T", 0x18: "U", 0x19: "V", 0x1a: "W", 0x1b: "X",
-        0x1c: "Y", 0x1d: "Z",
-        0x1e: "1", 0x1f: "2", 0x20: "3", 0x21: "4", 0x22: "5",
-        0x23: "6", 0x24: "7", 0x25: "8", 0x26: "9", 0x27: "0",
-        0x28: "Enter", 0x29: "Escape", 0x2a: "Backspace", 0x2b: "Tab",
-        0x2c: "Space", 0x2d: "-", 0x2e: "=", 0x2f: "[", 0x30: "]",
-        0x31: "\\", 0x33: ";", 0x34: "'", 0x35: "`", 0x36: ",",
-        0x37: ".", 0x38: "/",
-        0x3a: "Caps Lock",
-        0x3b: "F1", 0x3c: "F2", 0x3d: "F3", 0x3e: "F4", 0x3f: "F5", 0x40: "F6",
-        0x41: "F7", 0x42: "F8", 0x43: "F9", 0x44: "F10", 0x45: "F11", 0x46: "F12",
-        0x54: "KP /", 0x55: "KP *", 0x56: "KP -", 0x57: "KP +",
-        0x58: "KP Enter", 0x59: "KP 1", 0x5a: "KP 2", 0x5b: "KP 3",
-        0x5c: "KP 4", 0x5d: "KP 5", 0x5e: "KP 6", 0x5f: "KP 7",
-        0x60: "KP 8", 0x61: "KP 9", 0x62: "KP 0", 0x63: "KP .",
-        0xe0: "Left Ctrl", 0xe1: "Left Shift", 0xe2: "Left Alt", 0xe3: "Left GUI",
-        0xe4: "Right Ctrl", 0xe5: "Right Shift", 0xe6: "Right Alt", 0xe7: "Right GUI",
-      };
-
-      let device = null;
-      let raw = new Uint8Array(CONFIG_LEN);
-
-      const $ = (id) => document.getElementById(id);
-      const status = (msg, cls = "") => {
-        const el = $("status");
-        el.textContent = msg;
-        el.className = cls;
-      };
-
-      function checksum(bytes) {
-        let s = 0;
-        for (let i = 0; i < CONFIG_LEN - 1; i++) s = (s + bytes[i]) & 0xff;
-        return s;
-      }
-
-      function makeKeyGrid() {
-        const grid = $("keys");
-        for (let i = 0; i < 16; i++) {
-          const cell = document.createElement("div");
-          cell.className = "cell";
-          const label = document.createElement("label");
-          label.textContent = `Key ${i + 1}`;
-          const sel = document.createElement("select");
-          sel.id = `key${i}`;
-          const codes = Object.keys(HID).map(Number).sort((a, b) => a - b);
-          for (const code of codes) {
-            const opt = document.createElement("option");
-            opt.value = String(code);
-            opt.textContent = `${HID[code]} (0x${code.toString(16).padStart(2, "0")})`;
-            sel.appendChild(opt);
-          }
-          cell.appendChild(label);
-          cell.appendChild(sel);
-          grid.appendChild(cell);
-        }
-      }
-
-      function parseConfig(bytes) {
-        raw = bytes.slice(0, CONFIG_LEN);
-        for (let i = 0; i < 16; i++) {
-          const code = raw[2 + i];
-          const sel = $(`key${i}`);
-          if (![...sel.options].some((o) => Number(o.value) === code)) {
-            const opt = document.createElement("option");
-            opt.value = String(code);
-            opt.textContent = `0x${code.toString(16).padStart(2, "0")}`;
-            sel.appendChild(opt);
-          }
-          sel.value = String(code);
-        }
-        $("brightness").value = String(Math.min(31, raw[18]));
-        $("brightnessValue").textContent = String($("brightness").value);
-        // A stored LED mode with no matching <option> leaves select.value at "",
-        // and Number("") is 0 -- so any later save would silently rewrite the
-        // device's LED mode to "Off". Synthesise the option instead, exactly as
-        // the keymap selects above do for unknown HID codes.
-        const ledMode = raw[19];
-        const ledSel = $("ledMode");
-        if (![...ledSel.options].some((o) => Number(o.value) === ledMode)) {
-          const opt = document.createElement("option");
-          opt.value = String(ledMode);
-          opt.textContent = `Unknown (${ledMode})`;
-          ledSel.appendChild(opt);
-        }
-        ledSel.value = String(ledMode);
-      }
-
-      function buildConfig() {
-        const out = raw.slice(0, CONFIG_LEN);
-        for (let i = 0; i < 16; i++) {
-          out[2 + i] = Number($(`key${i}`).value) & 0xff;
-        }
-        // The range input cannot represent anything outside 0..31, so an
-        // out-of-range stored value is normalised here rather than preserved.
-        // The field is defined as 0..31 (APA102 global brightness), so there is
-        // no valid value this loses.
-        out[18] = Number($("brightness").value) & 0xff;
-        out[19] = Number($("ledMode").value) & 0xff;
-        out[31] = checksum(out);
-        return out;
-      }
-
-      async function send(bytes) {
-        await device.transferOut(EP_OUT, bytes);
-      }
-
-      async function recvResponse(expectedCmd = null) {
-        const result = await device.transferIn(EP_IN, 1 + CONFIG_LEN);
-        if (result.status !== "ok") {
-          throw new Error(`transferIn status: ${result.status}`);
-        }
-        const bytes = new Uint8Array(
-          result.data.buffer,
-          result.data.byteOffset,
-          result.data.byteLength,
-        );
-        if (bytes.length < 1) {
-          throw new Error("empty response from device");
-        }
-        if (expectedCmd !== null && bytes.length > 1 && bytes[1] !== expectedCmd) {
-          throw new Error(`bad response echo: got ${bytes[1]}, expected ${expectedCmd}`);
-        }
-        return bytes;
-      }
-
-      async function loadConfig() {
-        await send(new Uint8Array([CMD_GET]));
-        const resp = await recvResponse();
-        if (resp.length < 1 + CONFIG_LEN || resp[0] !== 0) {
-          throw new Error("GET_CONFIG failed");
-        }
-        parseConfig(resp.subarray(1));
-        status("Loaded config from device.", "ok");
-      }
-
-      async function applyConfig() {
-        const bytes = buildConfig();
-        const packet = new Uint8Array(1 + CONFIG_LEN);
-        packet[0] = CMD_SET;
-        packet.set(bytes, 1);
-        await send(packet);
-        const resp = await recvResponse(CMD_SET);
-        if (resp[0] !== 0) throw new Error("SET_CONFIG rejected");
-        raw = bytes;
-        status("Config applied (not saved).", "ok");
-      }
-
-      async function saveConfig() {
-        await applyConfig();
-        await send(new Uint8Array([CMD_SAVE]));
-        const resp = await recvResponse(CMD_SAVE);
-        if (resp[0] !== 0) throw new Error("SAVE failed");
-        status("Saved to flash.", "ok");
-      }
-
-      async function resetDefaults() {
-        await send(new Uint8Array([CMD_RESET]));
-        const resp = await recvResponse(CMD_RESET);
-        if (resp[0] !== 0) throw new Error("RESET failed");
-        await loadConfig();
-        status("Reset to defaults (not saved).", "ok");
-      }
-
-      let busy = false;
-      function setControls(enabled) {
-        $("connect").disabled = !enabled || !!device;
-        $("disconnect").disabled = !enabled || !device;
-        $("reload").disabled = !enabled || !device;
-        $("defaults").disabled = !enabled || !device;
-        $("save").disabled = !enabled || !device;
-        $("brightness").disabled = !enabled || !device;
-        $("ledMode").disabled = !enabled || !device;
-        for (let i = 0; i < 16; i++) $(`key${i}`).disabled = !enabled || !device;
-      }
-
-      async function withBusy(fn) {
-        if (busy) return;
-        busy = true;
-        setControls(false);
-        try {
-          await fn();
-        } catch (err) {
-          status(String(err), "err");
-        } finally {
-          busy = false;
-          setControls(true);
-        }
-      }
-
-      async function connect() {
-        if (!navigator.usb) {
-          status("WebUSB is not available in this browser.", "err");
-          return;
-        }
-        await withBusy(async () => {
-          device = await navigator.usb.requestDevice({
-            filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }],
-          });
-          await device.open();
-          await device.selectConfiguration(1);
-          await device.claimInterface(IFACE);
-          setControls(true);
-          await loadConfig();
-        });
-      }
-
-      $("connect").addEventListener("click", connect);
-      $("disconnect").addEventListener("click", async () => {
-        if (!device) return;
-        // Release the interface and close the handle. Leaving them claimed keeps
-        // the device held by this tab, so another origin (or a reload of this
-        // one) cannot open it until the tab is closed.
-        const dying = device;
-        device = null;
-        setControls(false);
-        $("connect").disabled = false;
-        try {
-          await dying.releaseInterface(IFACE);
-          await dying.close();
-          status("Disconnected.", "ok");
-        } catch (err) {
-          status(`Disconnect error: ${err.message}`, "err");
-        }
-      });
-      $("reload").addEventListener("click", () => withBusy(loadConfig));
-      $("defaults").addEventListener("click", () => withBusy(resetDefaults));
-      $("save").addEventListener("click", () => withBusy(saveConfig));
-      $("brightness").addEventListener("input", (e) => {
-        $("brightnessValue").textContent = e.target.value;
-      });
-
-      makeKeyGrid();
-      if (!window.isSecureContext) {
-        status("WebUSB requires a secure context (localhost or HTTPS).", "err");
-      }
-    </script>
+    <script src="app.js"></script>
   </body>
 </html>

@@ -273,11 +273,15 @@ function refreshDirty() {
   const n = dirtyKeys().length;
   const settingsChanged =
     draft[BRIGHTNESS_OFF] !== raw[BRIGHTNESS_OFF] || draft[LEDMODE_OFF] !== raw[LEDMODE_OFF];
-  const changed = n > 0 || settingsChanged;
+  // isDirty() is the authority; the named buckets only describe what changed.
+  // Deriving the flag from the buckets hid colour-only and media-only edits from
+  // the badge while beforeunload still warned about them.
+  const changed = isDirty();
   $("dirtyBadge").classList.toggle("show", changed && !!device);
   const parts = [];
   if (n) parts.push(`${n} key${n === 1 ? "" : "s"}`);
   if (settingsChanged) parts.push("settings");
+  if (changed && !n && !settingsChanged) parts.push("colours / media");
   $("dirtyText").textContent = "Unsaved: " + parts.join(", ");
   $("save").classList.toggle("dirty", changed && !!device);
   renderPad();

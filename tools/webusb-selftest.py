@@ -176,6 +176,11 @@ window.addEventListener("load", async () => {
             draft[25] === 0x00 && draft[26] === 216 && draft[27] === 255]);
   }
 
+  // A colour-only edit is still an unsaved edit. beforeunload already warns
+  // about it, so the on-screen indicator must agree.
+  r.push(["colour-only change marks the draft unsaved",
+          document.getElementById("dirtyBadge").classList.contains("show")]);
+
   // --- the device rejects a write ---
   // A stub that always ACKs never reaches app.js's `resp[0] !== OK` branches.
   // The bad case is a save that silently looked successful: the editor must

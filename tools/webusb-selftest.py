@@ -273,9 +273,34 @@ def check_slot_color_defaults_agree() -> None:
     print("  PASS  firmware and editor share the same slot colour defaults")
 
 
+def check_app_version_matches_crate() -> None:
+    """The editor has no build step, so the version it displays is a literal in
+    index.html. Nothing would notice when the crate is bumped and the page is
+    not, so check it here rather than ship a page advertising an old release."""
+    cargo = (ROOT / "firmware" / "Cargo.toml").read_text()
+    m = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.M)
+    if not m:
+        sys.exit("could not find the crate version in firmware/Cargo.toml")
+    crate = m.group(1)
+
+    html = (ROOT / "web" / "index.html").read_text()
+    m2 = re.search(r'id="appVersion"[^>]*>v([^<]+)<', html)
+    if not m2:
+        sys.exit('could not find the version badge (id="appVersion") in web/index.html')
+    shown = m2.group(1)
+
+    if shown != crate:
+        sys.exit(
+            f"editor displays v{shown} but the crate is {crate}. "
+            "Update the badge in web/index.html."
+        )
+    print(f"  PASS  editor displays the current version v{crate}")
+
+
 def main() -> int:
     check_media_key_lists_agree()
     check_slot_color_defaults_agree()
+    check_app_version_matches_crate()
     browser = find_browser()
 
     with tempfile.TemporaryDirectory() as tmp:

@@ -99,6 +99,10 @@ then open `http://localhost:8080`. WebUSB requires a secure context; both HTTPS
 and `localhost` qualify. USB access is granted per origin, so the Pages site and
 localhost each need their own one-time grant.
 
+Configuration is cable-only. A Web Bluetooth path was evaluated and rejected —
+the HID service is on the browser's GATT blocklist, so it would cost a whole
+second vendor service with its own trust model to save plugging one cable in.
+
 ## Media keys
 
 Any key can be a media key. In the editor, switch the assignment panel from

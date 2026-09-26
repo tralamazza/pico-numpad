@@ -62,9 +62,14 @@ wastes the fact that the pad's strength is input, not display.
 - The existing long-press-to-clear-bond gesture must not collide with digit
   entry.
 
-## Relationship to the two-mode design
+## Config stays on USB
 
-Passkey entry applies to HOGP pairing (pad ↔ laptop). The Web Bluetooth config
-channel needs its own security decision — see `web-ble-plan.md`. They are
-separate links with separate trust, and a browser pairing with the config
-service should not inherit the HID bond.
+A wireless config channel was evaluated and dropped. A browser cannot reach
+the HID service at all — Human Interface Device (`0x1812`) is on the Web
+Bluetooth GATT blocklist — so config would need a second vendor service,
+MTU chunking for the 32-byte record, and its own bond and trust model, for a
+device you configure with a cable to hand. Configuration is USB-only by
+decision; the WebUSB bulk interface in `usb.rs` is the only config path.
+
+There is therefore no second link on this device. Passkey entry concerns only
+pad <-> laptop HID pairing, and nothing else has to be kept clear of it.

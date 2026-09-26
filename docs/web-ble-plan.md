@@ -2,6 +2,29 @@
 
 Goal: let the web editor talk to the pad over BLE instead of requiring a cable.
 
+## Resolution: two explicit modes, not concurrent connections
+
+The concurrency blocker is avoided rather than solved. The pad gets two
+advertised modes, switched by a deliberate physical gesture:
+
+- **HID mode** (default) — HOGP keyboard peripheral, what it does today.
+- **Config mode** — stops HOGP advertising, advertises a vendor config service
+  that Web Bluetooth can reach.
+
+This is better than concurrent connections on three counts:
+
+1. No second simultaneous link, so no controller-limit gamble and no
+   advertising-while-connected radio cost on a battery-powered device.
+2. Config over the air is only available when the user physically put the
+   device into config mode. That is an attestation the browser cannot forge and
+   it answers most of the security objection below.
+3. Discoverability is solved by construction: in config mode the pad is
+   advertising the thing the web page is looking for.
+
+Cost: configuring requires a deliberate mode switch, and the pad is not a
+keyboard while in config mode. For a device you configure occasionally, that is
+the right trade.
+
 ## Hard constraint: Web Bluetooth cannot touch the HID service
 
 `00001812-...` (Human Interface Device) is on the Web Bluetooth GATT blocklist.

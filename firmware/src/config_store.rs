@@ -1,12 +1,10 @@
-//! Flash-backed persistence for [`Config`].
-//!
-//! The config lives in the last 64 KiB of the 4 MiB QSPI flash, which is kept out
-//! of the linker's code region by `memory.x`. One 4 KiB sector holds one 32-byte
-//! record; saving erases the sector and programs the record.
+//! Flash-backed persistence for [`Config`] and the host-slot journal, in the top
+//! 64 KiB of QSPI flash that `memory.x` keeps out of the linker's code region.
+//! Pre: [`init`] has moved the flash driver into the global store.
+//! Post: callers update their RAM state only after a save returns true.
 
-// Flash offsets are `u32` (the NorFlash API) while flash sizes are `usize` (they
-// are generic array parameters). On the 4 MiB RP2350 part every conversion here
-// is loss-free, so the narrowing casts are intentional.
+// Flash offsets are u32 (NorFlash API) and sizes are usize (generic array
+// parameters); on the 4 MiB part every conversion here is loss-free.
 #![allow(clippy::cast_possible_truncation)]
 
 use core::ops::Range;
@@ -37,8 +35,8 @@ const SECTOR: u32 = ERASE_SIZE as u32;
 pub const BOND_OFFSET: u32 = CONFIG_OFFSET + SECTOR;
 /// Size of the BLE bond storage range.
 pub const BOND_LEN: u32 = 8 * 1024;
-// A separate journal makes migration non-destructive and prevents a cleared
-// slot from resurrecting the legacy bond after a restart.
+// A separate journal keeps migration non-destructive and stops a cleared slot
+// resurrecting the legacy bond.
 const HOSTS_OFFSET: u32 = BOND_OFFSET + BOND_LEN;
 const HOSTS_LEN: u32 = 8 * 1024;
 
@@ -64,9 +62,8 @@ pub fn init(flash: ConfigFlash) {
     });
 }
 
-/// Read the config from flash into the shared [`CONFIG`].
-///
-/// Returns the loaded config, or `None` if the sector is blank/corrupt.
+/// Read the config from flash. Post: `Some` only if the record parses; `None`
+/// on a blank or corrupt sector.
 pub async fn load(flash: &mut ConfigFlash) -> Option<Config> {
     let mut buf = AlignedBuf([0u8; CONFIG_LEN]);
     if flash.read(CONFIG_OFFSET, &mut buf.0).await.is_err() {
@@ -195,9 +192,9 @@ pub async fn save_hosts(hosts: &HostSlots) -> bool {
     }
 }
 
-/// Explicit recovery reset only. This erases all host bonds, not key/LED config.
-/// Erase the legacy region first so an interrupted reset cannot migrate an old
-/// bond back into an empty journal. Failure leaves the caller in recovery mode.
+/// Erase all host bonds (not key/LED config), legacy region first so an
+/// interrupted reset cannot migrate an old bond back into an empty journal.
+/// Post: `false` leaves the caller in recovery mode.
 pub async fn reset_hosts() -> bool {
     let Some(store) = STORE.try_get() else {
         return false;

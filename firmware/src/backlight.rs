@@ -1,8 +1,6 @@
-//! APA102 (`DotStar`) backlight driver for the Pico RGB Keypad Base.
-//!
-//! 16 APA102 LEDs on SPI0 (DATA=MOSI=GP19, CLK=GP18) with an active-low chip
-//! select on GP17 that is asserted only for the duration of a transfer, matching
-//! the behaviour of the Pimoroni C++ library.
+//! APA102 (`DotStar`) backlight for the Pico RGB Keypad Base: 16 LEDs on SPI0
+//! (MOSI=GP19, CLK=GP18) with active-low CS on GP17, asserted only during a
+//! transfer.
 
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi::{Async, Error, Spi};

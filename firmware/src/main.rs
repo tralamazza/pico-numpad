@@ -60,8 +60,7 @@ async fn main(spawner: Spawner) {
     i2c_cfg.sda_pullup = true;
     i2c_cfg.scl_pullup = true;
     let i2c = I2c::new_async(p.I2C0, p.PIN_5, p.PIN_4, Irqs, i2c_cfg);
-    // TCA9555 INT is wired to GP3 on the Pico RGB Keypad Base with an on-board
-    // 10k pull-up to 3V3 (RM1-7). Nothing else in this firmware uses GP3.
+    // TCA9555 INT on GP3: 10k on-board pull-up to 3V3 (RM1-7), unused elsewhere.
     let keypad_int = Input::new(p.PIN_3, Pull::Up);
     let mut keypad = keypad::Keypad::new(i2c, keypad_int);
     keypad.init().await.expect("keypad init");
@@ -84,8 +83,7 @@ async fn main(spawner: Spawner) {
         Ok(hosts) => hosts,
         Err(reason) => {
             defmt::error!("host storage recovery: {}", reason);
-            // Recovery needs neither the radio nor a valid bond record. Keep
-            // USB configuration and physical recovery controls available.
+            // Recovery needs neither the radio nor a valid bond record.
             join(
                 ble::recover(keypad, backlight),
                 usb::run_usb(UsbDriver::new(p.USB, Irqs)),

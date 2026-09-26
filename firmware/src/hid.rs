@@ -1,8 +1,7 @@
-//! Report-protocol HID descriptor and keyboard report construction.
-//!
-//! The device exposes a single input report (Report ID 1) with the standard
-//! 8-byte keyboard layout: `[modifiers, reserved, key0..key5]`. Over GATT the
-//! Report ID is carried by the Report Reference descriptor, not the payload.
+//! Report-protocol HID descriptors and report construction. Report ID 1 is the
+//! 8-byte keyboard layout `[modifiers, reserved, key0..key5]`; report ID 2 is
+//! the consumer/media bitmask. Over GATT the report ID comes from the Report
+//! Reference descriptor; over USB it is prefixed in-band.
 
 /// Report-protocol keyboard descriptor (Report ID 1).
 ///
@@ -34,39 +33,24 @@ const KEYBOARD_MAP_BYTES: [u8; KBD_MAP_LEN] = [
     0xC0, // End Collection
 ];
 
-/// Keyboard collection only (Report ID 1), for its own USB HID interface.
-///
-/// One interface per collection is not cosmetic. macOS creates one
-/// `IOHIDDevice` per USB HID interface and takes the *first* collection's
-/// usage as that device's primary usage. With both collections on one
-/// interface the pad shows up as a keyboard only: the consumer pair is still
-/// listed in `DeviceUsagePairs`, but the keyboard driver owns the device and
-/// never runs volume-key handling over it, so Volume Increment reaches the
-/// host and does nothing. Splitting the interfaces is what makes media keys
-/// work -- verified against a live macOS host.
+/// Keyboard collection only (Report ID 1), on its own USB interface. macOS
+/// makes one `IOHIDDevice` per interface and takes that interface's first
+/// collection as its primary usage, so sharing one with the consumer pair
+/// leaves media keys dead. Splitting them is what makes volume work.
 pub const KEYBOARD_REPORT_MAP: &[u8] = &[
     0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00,
     0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x03, 0x95, 0x06,
     0x75, 0x08, 0x15, 0x00, 0x25, 0xff, 0x05, 0x07, 0x19, 0x00, 0x29, 0xff, 0x81, 0x00, 0xc0,
 ];
 
-/// Length of the GATT keyboard Report characteristic value (no Report ID
-/// prefix): `[modifiers, reserved, key0..key5]`.
+/// Length of the GATT keyboard Report characteristic value (no Report ID prefix):
+/// `[modifiers, reserved, key0..key5]`.
 pub const REPORT_LEN: usize = 8;
 
-/// Consumer usages this firmware can emit, in the order they become bits of
-/// the consumer report.
-///
-/// The descriptor below is generated from this list, and the web editor must
-/// offer exactly these codes: a code that is not here has no bit and would
-/// silently do nothing. `tools/webusb-selftest.py` checks the two agree.
-/// The controls this pad offers, in mask-bit order.
-///
-/// Deliberately excludes the Consumer usages that would let a single keypress
-/// next to the volume keys shut the host down: `0x30` System Power Down and
-/// `0x32` System Sleep both map to real, destructive-by-default key events on
-/// Linux (`KEY_POWER`, `KEY_SLEEP`) and do the same on macOS. A numpad should
-/// not be able to power off a laptop by accident.
+/// Controls this pad offers, in consumer mask-bit order. The web editor must offer
+/// exactly these codes: a code not listed here has no bit and does nothing.
+/// Deliberately excludes 0x30 (Power Down) and 0x32 (Sleep) -- both are
+/// destructive by default on Linux and macOS.
 pub const CONSUMER_KEYS: [u8; 14] = [
     0xcd, // Play / Pause
     0xb5, // Scan Next Track
@@ -84,22 +68,14 @@ pub const CONSUMER_KEYS: [u8; 14] = [
     0x46, // Menu Escape
 ];
 
-/// The consumer report is a bitmask over [`CONSUMER_KEYS`], one bit per key,
-/// little-endian. Rounded up rather than divided: at 14 keys `/ 8` gives 1,
-/// which would not even typecheck against the 2 bytes a 14-bit mask needs, but
-/// `div_ceil` is both correct for any key count and says so explicitly.
+/// Consumer report = little-endian bitmask over [`CONSUMER_KEYS`].
+/// Post: wide enough for every key in `CONSUMER_KEYS`.
 pub const CONSUMER_REPORT_LEN: usize = CONSUMER_KEYS.len().div_ceil(8);
 
-/// Generate the consumer report descriptor from [`CONSUMER_KEYS`].
-///
-/// Every key is declared as its own 1-bit variable field. That is deliberate
-/// and was settled by testing rather than taste: with a usage *array*
-/// (`Usage Minimum 0x00, Usage Maximum 0xFF, Report Size 8`) macOS accepts
-/// the descriptor, creates the Consumer Control device, and receives the
-/// reports -- and routes none of them. Volume only moved once each usage was
-/// declared explicitly as a boolean field, which is also how Apple's own
-/// keyboards declare theirs. A host has to be able to see *which* control a
-/// bit belongs to; a range it must decode at runtime is not enough.
+/// Generate the consumer descriptor from [`CONSUMER_KEYS`]: one 1-bit boolean
+/// field per usage. A usage *array* is accepted by macOS but routed nowhere;
+/// each control must be declared explicitly.
+/// Post: exactly `CONSUMER_KEYS.len()` variable fields in one application collection.
 const fn consumer_report_map() -> [u8; CON_MAP_LEN] {
     let mut out = [0u8; CON_MAP_LEN];
     let mut i = 0usize;
@@ -146,9 +122,7 @@ pub const CONSUMER_REPORT_MAP: &[u8] = &CONSUMER_MAP_BYTES;
 
 const CONSUMER_MAP_BYTES: [u8; CON_MAP_LEN] = consumer_report_map();
 
-/// Concatenate two descriptors. Const slice concatenation is not available and
-/// `A + B` in a const-generic return type needs the unstable
-/// `generic_const_exprs`, so the sizes are named constants instead.
+/// Const slice concatenation needs `generic_const_exprs`, so the sizes are named.
 const KBD_MAP_LEN: usize = 47;
 const CON_MAP_LEN: usize = 8 + 12 * CONSUMER_KEYS.len() + 1;
 
@@ -170,9 +144,8 @@ const fn concat_maps(
     out
 }
 
-/// The full report map BLE HOGP advertises: one map covering every report ID,
-/// so it is the two USB interface descriptors concatenated. Derived, so it
-/// cannot drift from what USB actually declares.
+/// The full report map BLE HOGP advertises: every report ID in one map, derived
+/// from the two USB interface descriptors so it cannot drift from them.
 pub const REPORT_MAP: &[u8] = &concat_maps(&KEYBOARD_MAP_BYTES, &CONSUMER_MAP_BYTES);
 
 /// Report IDs, as declared in [`REPORT_MAP`].
@@ -197,16 +170,10 @@ pub fn usb_consumer_report(report: [u8; CONSUMER_REPORT_LEN]) -> [u8; CONSUMER_R
     packet
 }
 
-/// Build the keyboard and consumer reports from a 16-bit pressed mask, a
-/// per-key usage map and the mask of which keys are consumer keys.
-///
-/// Keys whose bit is set in `consumer_mask` emit on the consumer page and are
-/// kept out of the keyboard report entirely; the rest go to the keyboard
-/// report as before.
-///
-/// The consumer report is a bitmask over [`CONSUMER_KEYS`], so unlike a bare
-/// usage code it can carry several media keys at once. A consumer key mapped to
-/// a code outside `CONSUMER_KEYS` contributes nothing -- there is no bit for it.
+/// Build the keyboard and consumer reports from a 16-bit pressed mask.
+/// Pre: `consumer_mask[i]` routes key `i` (usage `keymap[i]`) to the consumer
+/// page, keeping it out of the keyboard report.
+/// Post: the consumer report is a bitmask over [`CONSUMER_KEYS`].
 #[must_use]
 pub fn build_reports(
     pressed: u16,
@@ -236,8 +203,7 @@ pub fn build_reports(
     (kbd, consumer_bits.to_le_bytes())
 }
 
-/// Keyboard-only build, for callers with no consumer keys. Kept so the
-/// keyboard behaviour tests below exercise the same code the device runs.
+/// Keyboard-only build, for callers with no consumer keys.
 #[must_use]
 pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
     build_reports(pressed, keymap, 0).0
@@ -293,9 +259,6 @@ mod tests {
         assert_eq!(build_report(0x1ff, &keymap), [0x12, 0, 4, 5, 6, 7, 8, 9]);
     }
 
-    /// Expected consumer report for a set of pressed usages, derived from
-    /// `CONSUMER_KEYS` rather than hardcoded, so the tests follow the table the
-    /// descriptor is generated from instead of drifting from it.
     fn consumer_report_for(usages: &[u8]) -> [u8; CONSUMER_REPORT_LEN] {
         let mut bits = 0u16;
         for &u in usages {
@@ -343,8 +306,6 @@ mod tests {
         assert_eq!(build_reports(0, &keymap, 1 << 5).1, [0x00, 0x00]);
     }
 
-    /// The report is a bitmask, so two media keys held together report both --
-    /// which a single-usage report could not do.
     #[test]
     fn simultaneous_consumer_keys_report_both() {
         let mut keymap = [0x5f; 16];
@@ -355,21 +316,14 @@ mod tests {
         assert_ne!(cons, consumer_report_for(&[0xe9]));
     }
 
-    /// A usage the descriptor never declares has no bit, so it must contribute
-    /// nothing rather than landing on some other control.
     #[test]
     fn an_undeclared_consumer_usage_emits_nothing() {
         let mut keymap = [0x5f; 16];
-        keymap[1] = 0x8a; // a valid u8 that is not in CONSUMER_KEYS (the AL
-        // codes like Calculator 0x18A cannot even be stored in the keymap)
+        keymap[1] = 0x8a;
         let (_, cons) = build_reports(1 << 1, &keymap, 1 << 1);
         assert_eq!(cons, [0x00, 0x00]);
     }
 
-    /// A config saved before Power/Sleep were withdrawn still has the mask bit
-    /// and the usage byte. It must go inert, not leak into the keyboard report
-    /// as a stray keystroke -- `continue` in `build_reports` is what makes that
-    /// true, and this pins it down.
     #[test]
     fn a_previously_assigned_power_key_is_inert_not_a_stray_keystroke() {
         for usage in [0x30u8, 0x32] {
@@ -388,8 +342,6 @@ mod tests {
         }
     }
 
-    /// Every key the descriptor declares must be reachable, and each must land
-    /// on a distinct bit.
     #[test]
     fn every_declared_consumer_key_maps_to_its_own_bit() {
         let mut seen = 0u16;
@@ -409,9 +361,6 @@ mod tests {
         );
     }
 
-    /// A key mapped to a media code is only a media key if its mask bit is set.
-    /// Without the mask it is an ordinary keyboard usage, which is what keeps a
-    /// v1 config behaving exactly as it did before.
     #[test]
     fn a_media_code_without_its_mask_bit_is_an_ordinary_keyboard_usage() {
         let mut keymap = [0x5f; 16];
@@ -443,9 +392,6 @@ mod tests {
         assert_eq!(usb_report([0; REPORT_LEN])[0], KEYBOARD_REPORT_ID);
     }
 
-    /// The two per-interface USB descriptors must reassemble into exactly the
-    /// map BLE advertises. They are written out separately because const slice
-    /// indexing is not stable, which means nothing else stops them drifting.
     #[test]
     fn the_split_usb_descriptors_reassemble_into_the_ble_map() {
         let joined: Vec<u8> = KEYBOARD_REPORT_MAP
@@ -456,9 +402,6 @@ mod tests {
         assert_eq!(joined, REPORT_MAP);
     }
 
-    /// Each USB descriptor must be self-contained: its own page, its own report
-    /// ID, and a matching End Collection. A dangling collection here makes the
-    /// host reject the whole interface.
     #[test]
     fn each_usb_descriptor_is_a_complete_self_contained_collection() {
         let ids = |m: &[u8]| -> Vec<u8> {
@@ -474,21 +417,15 @@ mod tests {
         assert_eq!(&CONSUMER_REPORT_MAP[..2], &[0x05, 0x0c]);
         assert_eq!(CONSUMER_REPORT_MAP.last(), Some(&0xc0));
         assert_eq!(ids(CONSUMER_REPORT_MAP), vec![CONSUMER_REPORT_ID]);
-
-        // Neither may declare the other's report ID, or the host could route a
-        // report to the wrong interface.
         assert!(!ids(CONSUMER_REPORT_MAP).contains(&KEYBOARD_REPORT_ID));
         assert!(!ids(KEYBOARD_REPORT_MAP).contains(&CONSUMER_REPORT_ID));
     }
 
-    /// The descriptor must declare both report IDs, or a host will drop the
-    /// consumer report as undeclared.
     #[test]
     fn descriptor_declares_both_report_ids() {
         let has = |id: u8| REPORT_MAP.windows(2).any(|w| w[0] == 0x85 && w[1] == id);
         assert!(has(KEYBOARD_REPORT_ID));
         assert!(has(CONSUMER_REPORT_ID));
-        // and the consumer collection is on usage page 0x0C
         assert!(REPORT_MAP.windows(2).any(|w| w[0] == 0x05 && w[1] == 0x0C));
     }
 }

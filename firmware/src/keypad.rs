@@ -1,8 +1,6 @@
-//! TCA9555 I2C IO-expander driver for the Pico RGB Keypad Base buttons.
-//!
-//! The 16 silicone keys are wired to the expander's 16 GPIOs (not a scanned
-//! matrix). Each key pulls its line low when pressed, so the pressed mask is the
-//! bitwise NOT of the input registers.
+//! TCA9555 I2C IO-expander driver for the Pico RGB Keypad Base buttons. The 16
+//! silicone keys sit on the expander's 16 GPIOs (not a scanned matrix) and each
+//! pulls its line low when pressed, so the pressed mask is the NOT of the input.
 
 use embassy_futures::select::{Either, select};
 use embassy_rp::gpio::Input;
@@ -15,30 +13,19 @@ use crate::debounce::Debouncer;
 pub const ADDR: u8 = 0x20;
 
 /// Upper bound on how long the input loop may sleep without a guaranteed wake.
-///
-/// The INT line plus the control-state deadline cover every wake the firmware
-/// actually needs; this exists only to bound a *lost* interrupt, whose failure
-/// mode is a silently dead keyboard.
-///
-/// 1 s is a measured choice. With INT verified working on GP3 the interrupt
-/// always wins this race while typing, so this value only sets the *idle* wake
-/// rate: 100 ms measured 10 wakes/s idle, 1 s gives 1/s, and the original 5 ms
-/// poll was 200/s. If the interrupt ever stopped arriving the symptom would be
-/// up to 1 s of input latency -- degraded and obvious, and logged as an
-/// all-`Timeout` trace, rather than a dead pad.
+/// Only bounds a *lost* interrupt, whose failure mode is a dead keyboard. At 1 s
+/// the idle wake rate is 1/s and a dead INT line costs up to 1 s of latency --
+/// degraded and logged as an all-`Timeout` trace, not silent.
 pub const SAFETY_POLL_MS: u64 = 1_000;
 
-/// Why `wait_change` returned.
-///
-/// Worth distinguishing because a dead INT line is otherwise invisible: the
-/// safety timer covers for it, keys still work, and the only symptom is that
-/// idle power is ~10x higher than intended. `Timeout` dominating an idle period
-/// is the signature of an interrupt that is not arriving.
+/// Why `wait_change` returned. A dead INT line is otherwise invisible: the
+/// safety timer covers for it and keys still work, so `Timeout` dominating an
+/// idle period is the signature of an interrupt that is not arriving.
 #[derive(Debug, defmt::Format, PartialEq, Eq, Clone, Copy)]
 pub enum Wake {
     /// INT fell: a key moved.
     Interrupt,
-    /// INT was already low on entry -- a change landed during the previous read.
+    /// INT was already low on entry: a change landed during the previous read.
     AlreadyAsserted,
     /// The safety timer expired with no interrupt.
     Timeout,
@@ -54,8 +41,8 @@ pub struct Keypad<'d> {
 }
 
 impl<'d> Keypad<'d> {
-    /// `int` is the TCA9555 INT line: GP3 on the Pico RGB Keypad Base, pulled
-    /// high on-board by `RM1-7` (10k) to 3V3. Open drain, active low.
+    /// `int` is the TCA9555 INT line: GP3 on the base, open drain, active low,
+    /// pulled high on-board by `RM1-7` (10k).
     pub fn new(i2c: I2c<'d, Async>, int: Input<'d>) -> Self {
         Self {
             i2c,
@@ -65,14 +52,9 @@ impl<'d> Keypad<'d> {
     }
 
     /// Sleep until the expander reports an input change, or `max_ms` elapses.
-    ///
-    /// INT is open drain and is released *only* by reading the input registers,
-    /// so a `read_pressed` must follow every wake or the line stays asserted.
-    ///
-    /// Checking the level before sleeping closes the obvious race: if a key moved
-    /// during or after the previous read, the falling edge has already passed but
-    /// the line is still low. Sleeping on the edge there would drop the event until
-    /// the safety timer fired.
+    /// INT is open drain and is released only by reading the input registers, so
+    /// a `read_pressed` must follow every wake. Checking the level first closes
+    /// the race where the falling edge passed but the line is still low.
     pub async fn wait_change(&mut self, max_ms: u64) -> Wake {
         if self.int.is_low() {
             return Wake::AlreadyAsserted;
@@ -88,9 +70,8 @@ impl<'d> Keypad<'d> {
         }
     }
 
-    /// Configure all 16 expander pins as inputs.
+    /// Configure all 16 expander pins as inputs (config port 1 = input).
     pub async fn init(&mut self) -> Result<(), Error> {
-        // Configuration ports: 1 = input.
         self.i2c.write_async(ADDR, [REG_CONFIG0, 0xFF, 0xFF]).await
     }
 
@@ -104,12 +85,8 @@ impl<'d> Keypad<'d> {
     }
 
     /// Millis until the debouncer needs another sample to settle a pending
-    /// transition, or `None` when every key is stable.
-    ///
-    /// This is not optional for a sleeping reader. The read that clears INT is
-    /// taken too early to settle the transition it was woken by, so without a
-    /// follow-up sample at `since + DEBOUNCE_MS` presses are lost or keys are
-    /// left stuck. See `Debouncer::next_settle`.
+    /// transition, or `None` when every key is stable. A sleeping reader must
+    /// wake on this or presses are lost -- see `Debouncer::next_settle`.
     #[must_use]
     pub fn next_settle(&self, now: u64) -> Option<u64> {
         self.debounce.next_settle(now)

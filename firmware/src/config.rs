@@ -1,11 +1,7 @@
 //! Runtime configuration: key remap + LED settings, shared between the BLE key
-//! loop (reader) and the USB config handler (writer).
-//!
-//! The config is serialised to a fixed 32-byte little-endian record so it can be
-//! shipped over USB and stored in flash without a heap or serde.
-//!
-//! Deliberately free of external crates so `just test` can compile it with bare
-//! `rustc --test`. The lockable shared instance lives in [`crate::config_bus`].
+//! loop (reader) and the USB config handler (writer). Serialised to a fixed
+//! 32-byte little-endian record -- no heap, no serde -- and kept free of external
+//! crates so `just test` compiles it with bare `rustc --test`.
 
 /// Wire/flash size of a serialised [`Config`].
 pub const CONFIG_LEN: usize = 32;
@@ -15,9 +11,7 @@ const MAGIC: u8 = 0xC0;
 const VERSION: u8 = 3;
 /// Oldest version still accepted on read.
 const VERSION_LEGACY: u8 = 1;
-/// Version that introduced `consumer_mask`. Older records must not have these
-/// bytes read: they were reserved and could hold anything a future version put
-/// there.
+/// Version that introduced `consumer_mask`; bytes reserved before it must not be read.
 const VERSION_CONSUMER: u8 = 2;
 
 // Field offsets in the fixed 32-byte record.
@@ -25,13 +19,11 @@ const KEYMAP_OFF: usize = 2;
 const BRIGHTNESS_OFF: usize = 18;
 const LED_MODE_OFF: usize = 19;
 const CONSUMER_MASK_OFF: usize = 20;
-/// Three host slots x RGB, and the last of the reserved space. There are no
-/// spare bytes left after this; a future field means growing the record.
+/// Three host slots x RGB, in the last of the reserved space. No spare bytes
+/// remain: a future field means growing the record.
 const SLOT_COLORS_OFF: usize = 22;
 
-/// Per-slot identity colours, full range. The renderer scales these down per
-/// context rather than storing a colour per context, so one value per slot
-/// drives both the idle tint and the menu.
+/// Per-slot identity colour at full range; the renderer scales it per context.
 pub const DEFAULT_SLOT_COLORS: [[u8; 3]; 3] = [
     [255, 0, 216], // magenta
     [0, 216, 255], // cyan
@@ -57,14 +49,10 @@ pub const DEFAULT_KEYMAP: [u8; 16] = [
 #[derive(Clone, Copy, PartialEq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct Config {
-    /// HID usage code emitted for each physical key bit.
-    ///
-    /// Which usage *page* the code belongs to is decided by [`Config::consumer_mask`],
-    /// not by the value: page 0x07 (keyboard) unless the bit is set, in which
-    /// case page 0x0C (consumer). A mask is used rather than a second keymap so
-    /// the record stays 32 bytes, and so the modifier usages 0xE0..=0xE7 --
-    /// which are also above 0x80 -- keep meaning Left Ctrl..Right GUI instead of
-    /// being misread as consumer codes.
+    /// HID usage code emitted for each physical key bit. The usage *page* comes
+    /// from [`Config::consumer_mask`], not the value: page 0x07 unless the bit
+    /// is set, then 0x0C. A mask keeps the record at 32 bytes and stops the
+    /// modifier usages 0xE0..=0xE7 reading as consumer codes.
     pub keymap: [u8; 16],
     /// Bit `i` set => physical key `i` emits `keymap[i]` on the Consumer page
     /// (0x0C) as a Report ID 2 report, instead of the keyboard report.
@@ -73,11 +61,8 @@ pub struct Config {
     pub brightness: u8,
     /// LED behaviour, see [`led_mode`].
     pub led_mode: u8,
-    /// Identity colour per host slot, index 0..2.
-    ///
-    /// Stored at full range and scaled by the renderer for each context, so a
-    /// user picking "cyan" gets cyan whether it is the dim idle tint or the
-    /// brighter menu highlight.
+    /// Identity colour per host slot, index 0..2, stored at full range and
+    /// scaled by the renderer for each context.
     pub slot_colors: [[u8; 3]; 3],
 }
 
@@ -117,13 +102,9 @@ impl Config {
         b
     }
 
-    /// Deserialise, returning `None` if magic/version/checksum do not match.
-    ///
-    /// Records older than this firmware are accepted field by field: a field is
-    /// only read if the record's version actually has it, otherwise the default
-    /// applies. Bytes that were *reserved* in an older record must not be
-    /// interpreted, because they could hold whatever some other version put
-    /// there.
+    /// Deserialise, or `None` if magic, version or checksum mismatch.
+    /// Post: a field is only read if the record's version actually has it;
+    /// bytes that were reserved in an older record are never interpreted.
     #[must_use]
     pub fn from_bytes(b: &[u8; CONFIG_LEN]) -> Option<Config> {
         if b[0] != MAGIC || b[1] < VERSION_LEGACY || b[1] > VERSION {
@@ -169,12 +150,8 @@ mod tests {
     use super::*;
 
     /// The exact 32-byte record the web editor produces for the factory layout.
-    ///
-    /// This pins the wire format from the *other* end. The web editor is
-    /// JavaScript and reimplements this record by hand, so nothing else catches
-    /// the two drifting. If you change the default config, the magic, the field
-    /// offsets or the checksum, this test fails and `web/app.js` needs updating
-    /// to match.
+    /// Pins the wire format from the other end: change the defaults, magic,
+    /// offsets or checksum and this fails, and `web/app.js` must follow.
     const WEB_FACTORY: [u8; CONFIG_LEN] = [
         0xc0, 0x03, // magic, version 3
         0x5f, 0x60, 0x61, 0x54, // 7 8 9 /
@@ -190,8 +167,7 @@ mod tests {
         0x09, // checksum
     ];
 
-    /// A v1 record: identical layout, but version byte 1 and no consumer mask.
-    /// Devices flashed before consumer keys existed carry this.
+    /// A v1 record: identical layout, version byte 1, no consumer mask.
     const WEB_FACTORY_V1: [u8; CONFIG_LEN] = [
         0xc0, 0x01, // magic, version 1
         0x5f, 0x60, 0x61, 0x54, 0x5c, 0x5d, 0x5e, 0x55, 0x59, 0x5a, 0x5b, 0x56, 0x62, 0x63, 0x58,
@@ -208,13 +184,10 @@ mod tests {
         assert_eq!(Config::from_bytes(&WEB_FACTORY), Some(Config::default()));
     }
 
-    /// A v2 record has no colours. Its reserved bytes must not be read as one --
-    /// a device that never had the feature gets the defaults, not black slots.
     #[test]
     fn a_v2_record_gets_default_colours_not_its_reserved_bytes() {
         let mut b = Config::default().to_bytes();
         b[1] = 2;
-        // Reserved-as-colours bytes left zeroed, as a real v2 record has them.
         for slot in 0..3 {
             for c in 0..3 {
                 b[SLOT_COLORS_OFF + slot * 3 + c] = 0;
@@ -223,12 +196,10 @@ mod tests {
         b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
         let cfg = Config::from_bytes(&b).expect("v2 must still parse");
         assert_eq!(cfg.slot_colors, DEFAULT_SLOT_COLORS);
-        // and everything v2 did have survives
         assert_eq!(cfg.keymap, DEFAULT_KEYMAP);
         assert_eq!(cfg.brightness, 8);
     }
 
-    /// The same bytes read as colours on v3 must NOT be read as a mask on v1.
     #[test]
     fn a_v1_record_ignores_the_bytes_that_are_colours_in_v3() {
         let mut b = Config::default().to_bytes();
@@ -246,15 +217,10 @@ mod tests {
         assert_eq!(Config::from_bytes(&cfg.to_bytes()), Some(cfg));
     }
 
-    /// Colours live in the last of the reserved space; if that ever overlaps a
-    /// real field the record corrupts itself silently. Checked at compile time,
-    /// since it cannot change at runtime anyway.
+    /// Colours must not overlap a real field in the record. Compile-time check.
     const _: () = assert!(SLOT_COLORS_OFF + 9 == CONFIG_LEN - 1);
     const _: () = assert!(SLOT_COLORS_OFF > CONSUMER_MASK_OFF + 1);
 
-    /// A device flashed before consumer keys existed must keep working: the v1
-    /// record reads back as the same config with no consumer keys set, and is
-    /// rewritten as v2 on the next save.
     #[test]
     fn a_v1_record_migrates_to_the_defaults_with_no_consumer_keys() {
         let c = Config::from_bytes(&WEB_FACTORY_V1).expect("v1 record should be accepted");
@@ -262,9 +228,6 @@ mod tests {
         assert_eq!(c.consumer_mask, 0);
     }
 
-    /// The v1 reader must not pick up junk from the bytes that only became a
-    /// mask in v2 -- they were reserved, and a future version may put
-    /// something else there.
     #[test]
     fn a_v1_record_ignores_the_bytes_that_are_a_mask_in_v2() {
         let mut b = WEB_FACTORY_V1;
@@ -289,9 +252,8 @@ mod tests {
         assert!(back.is_consumer(15));
     }
 
-    /// Derived from the version constants rather than a hardcoded number, so
-    /// bumping `VERSION` cannot silently turn this test into one that asserts
-    /// the current version is rejected. That has already happened once here.
+    /// Derived from the version constants so bumping `VERSION` cannot silently
+    /// turn this into a test that asserts the current version is rejected.
     #[test]
     fn accepts_every_supported_version_and_rejects_the_rest() {
         let base = Config::default().to_bytes();
@@ -309,7 +271,6 @@ mod tests {
         }
     }
 
-    /// Guard the accepted range against a silly edit making it vacuous.
     const _: () = assert!(VERSION > VERSION_LEGACY);
 
     #[test]
@@ -338,8 +299,6 @@ mod tests {
         assert_eq!(Config::from_bytes(&b), None);
 
         let mut b = Config::default().to_bytes();
-        // 0 is not a version this firmware knows. (2 used to be an invalid value
-        // here; it is now the current record version, so it must be accepted.)
         b[1] = 0;
         assert_eq!(Config::from_bytes(&b), None);
     }

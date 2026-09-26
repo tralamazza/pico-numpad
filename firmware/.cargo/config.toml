@@ -1,14 +1,10 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-# Flash over SWD with probe-rs (user choice).
-# Slot changes intentionally reboot; do not halt the CPU on those resets.
+# Slot changes reboot the MCU on purpose; don't halt the CPU on those resets.
 runner = "probe-rs run --chip RP235x --no-catch-reset"
-# Alternative: picotool load -u -v -x -t elf
 
 [build]
 target = "thumbv8m.main-none-eabihf"
 
 [env]
-# Default for bare `cargo` invocations: full tracing, which is what you want at
-# the bench. `just build`/`just ship` override this with LOG_SHIP for the quiet
-# image (a process env var wins over this entry because `force` is not set).
+# Bare `cargo` gets full tracing; `just build`/`just ship` override with LOG_SHIP.
 DEFMT_LOG = "debug"

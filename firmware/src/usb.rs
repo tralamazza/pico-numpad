@@ -1,18 +1,7 @@
-//! Composite USB keyboard and `WebUSB` configuration interface.
-//!
-//! Presents a vendor-specific bulk interface reachable from a browser via `WebUSB`
-//! (and from libusb/pyusb). A tiny binary protocol reads/writes the shared
-//! [`Config`]:
-//!
-//! ```text
-//! host -> device: [cmd, ...]
-//!   0x01 GET_CONFIG   -> [0x00, <32 config bytes>]
-//!   0x02 SET_CONFIG   -> [0x00, 0x02, ...] on accept, [0x01, 0x02, ...] if malformed
-//!   0x03 SAVE         -> [0x00, 0x03, ...] / [0x01, 0x03, ...]
-//!   0x04 RESET_DEFAULTS -> [0x00, 0x04, ...]
-//!
-//! All responses are padded to 33 bytes so the host can always read a fixed size.
-//! ```
+//! Composite USB: a `WebUSB` config interface plus two HID interfaces. Replies
+//! are padded to 33 bytes: `0x01 GET_CONFIG` -> `[0x00, <32 config bytes>]`;
+//! `0x02 SET_CONFIG` / `0x03 SAVE` -> `[0x00 ok | 0x01 err, cmd, ...]`;
+//! `0x04 RESET_DEFAULTS` -> `[0x00, 0x04, ...]`.
 
 use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, usb_consumer_report, usb_report};
 use defmt::{info, warn};
@@ -42,12 +31,8 @@ static KEY_REPORT: Mutex<CriticalSectionRawMutex, (u32, [u8; REPORT_LEN])> =
 static CONSUMER_REPORT: Mutex<CriticalSectionRawMutex, (u32, [u8; CONSUMER_REPORT_LEN])> =
     Mutex::new((0, [0; CONSUMER_REPORT_LEN]));
 
-/// Publish both input reports for the current key state.
-///
-/// Sent together rather than via two separate calls so a reader cannot observe a
-/// half-updated state -- both reports come from the same poll of the keys, and
-/// splitting them would let the keyboard report land a moment before the media
-/// one.
+/// Publish both input reports for one poll of the keys, under a single
+/// generation stamp so no reader can observe a half-updated pair.
 pub async fn publish_reports(report: [u8; REPORT_LEN], consumer: [u8; CONSUMER_REPORT_LEN]) {
     let generation = GENERATION.load(Ordering::Relaxed);
     *KEY_REPORT.lock().await = (generation, report);
@@ -107,11 +92,9 @@ async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>)
     }
 }
 
-/// The consumer report goes out on its own HID interface, not the keyboard's.
-///
-/// Same generation and suspend discipline as [`keyboard_loop`], but a separate
-/// task with a separate writer: the two interfaces are separate devices to the
-/// host, so neither may hold up the other.
+/// Consumer report on its own HID interface, with the same generation and suspend
+/// discipline as [`keyboard_loop`]. Separate task, separate writer: the host sees
+/// two devices and neither may hold up the other.
 async fn consumer_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 3>) {
     let mut last = None;
     let mut generation = GENERATION.load(Ordering::Relaxed);
@@ -147,7 +130,6 @@ const MAX_PACKET: u16 = 64;
 
 // Windows needs a stable interface GUID to bind WinUSB without an INF.
 const DEVICE_INTERFACE_GUIDS: &[&str] = &["{2E8A000A-0000-4000-8000-00000000000A}"];
-
 const CMD_GET: u8 = 0x01;
 const CMD_SET: u8 = 0x02;
 const CMD_SAVE: u8 = 0x03;
@@ -189,13 +171,8 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let webusb_config = WEBUSB_CONFIG.init(WebUsbConfig {
         max_packet_size: MAX_PACKET,
         vendor_code: 1,
-        // What the browser's "pico-numpad detected" notification points at.
-        // Deployed to GitHub Pages by .github/workflows/pages.yml, so the nudge
-        // resolves without running anything locally. `just serve` still works
-        // for iterating on the editor, but the browser grants USB access per
-        // origin -- a grant for the Pages origin does not cover localhost and
-        // vice versa. The firmware cannot defer or rate-limit the notification;
-        // it fires on every enumeration.
+        // Deployed to GitHub Pages by .github/workflows/pages.yml. USB access is
+        // granted per origin, so a Pages grant does not cover `just serve`.
         landing_url: Some(Url::new("https://tralamazza.github.io/pico-numpad/")),
     });
 
@@ -237,14 +214,12 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
     let mut alt = iface.alt_setting(0xff, 0x00, 0x00, None);
     let write_ep = alt.endpoint_bulk_in(None, MAX_PACKET);
     let read_ep = alt.endpoint_bulk_out(None, MAX_PACKET);
-    // FunctionBuilder finalises the function descriptor when dropped, so it must
-    // go before the builder is consumed. The alt/iface builders have no Drop and
-    // are released by NLL at their last use.
+    // FunctionBuilder finalises its descriptor on drop, so it must go before the
+    // builder is consumed.
     drop(func);
 
-    // HID is appended last on purpose. The WebUSB editor opens the vendor bulk
-    // interface by a fixed number (`IFACE` in web/index.html), so putting HID
-    // ahead of it would shift that number and silently break the editor.
+    // HID is appended last: the web editor opens the vendor bulk interface by a
+    // fixed number (`IFACE` in web/index.html).
     builder.handler(EVENTS.init(UsbEvents));
     let keyboard = HidWriter::<_, 9>::new(
         &mut builder,
@@ -258,9 +233,8 @@ pub async fn run_usb<D: Driver<'static> + 'static>(driver: D) -> ! {
             hid_boot_protocol: HidBootProtocol::None,
         },
     );
-    // A second HID interface carrying only the consumer collection. See the
-    // note on KEYBOARD_REPORT_MAP for why sharing the keyboard's interface
-    // leaves media keys dead on macOS.
+    // Second HID interface: see KEYBOARD_REPORT_MAP for why sharing the
+    // keyboard's interface leaves media keys dead on macOS.
     let consumer = HidWriter::<_, 3>::new(
         &mut builder,
         CONSUMER_HID_STATE.init(HidState::new()),

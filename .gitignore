@@ -1,23 +1,19 @@
 # Rust build artifacts
 target/
 
+# Python bytecode from the tools/ harnesses
+__pycache__/
+
 # Editor / OS cruft
 .DS_Store
 
-# Binary blobs are ignored by default. In this repo a stray .bin is either a dump
-# of live pairing material or a build artifact, and neither belongs in git.
-#
-# The cyw43 firmware blobs are the deliberate exception: they are prebuilt
-# Broadcom/Cypress binaries required to build, they are tracked, and the negation
-# keeps them tracked if they are ever deleted and re-added. Without it `git add
-# firmware/cyw43-firmware/` would silently skip them.
+# Binary blobs are ignored by default: a stray .bin is either a dump of live
+# pairing material or a build artifact. The cyw43 blobs are the deliberate
+# exception -- prebuilt, required to build, and tracked.
 *.bin
 !firmware/cyw43-firmware/*.bin
 
-# Real pairing material dumped from the device by `just backup-storage`.
-#
-# This contains live BLE bond keys (LTK/IRK) for every paired host. Covered by
-# the *.bin rule above; named explicitly so the reason is not lost. .gitignore is
-# no defence against `git add -f`, nor against the whole directory being archived
-# or copied somewhere that gets published -- keep an out-of-tree copy as well.
+# Live BLE bond keys (LTK/IRK) for every paired host, dumped by
+# `just backup-storage`. .gitignore is no defence against `git add -f` -- keep
+# an out-of-tree copy too.
 pico-numpad-config-backup.bin

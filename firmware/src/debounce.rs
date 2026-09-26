@@ -34,18 +34,9 @@ impl Debouncer {
     }
 
     /// Millis from `now` until a pending transition would settle, or `None` when
-    /// every key is already stable.
-    ///
-    /// `update` accepts a transition only once its candidate has held for
-    /// `DEBOUNCE_MS`, so it needs a sample *after* that point. A polling loop
-    /// gets that sample for free; an interrupt-driven loop does not, because the
-    /// expander goes quiet once the line stops moving and the read that cleared
-    /// INT was taken too early to settle anything.
-    ///
-    /// Skipping this loses presses outright (the release overwrites the
-    /// candidate before it ever stabilises) or reports them a whole safety
-    /// timeout late and leaves the key stuck until the next one. Any loop that
-    /// sleeps between reads must wake on this.
+    /// every key is stable. `update` only accepts a transition once its candidate
+    /// has held for `DEBOUNCE_MS`, so it needs a sample after that point; a
+    /// sleeping reader must wake on this or presses are lost or left stuck.
     #[must_use]
     pub fn next_settle(&self, now: u64) -> Option<u64> {
         if !self.initialised {
@@ -54,8 +45,6 @@ impl Debouncer {
         let mut pending = false;
         let mut soonest = u64::MAX;
         for (bit, since) in self.since.iter().enumerate() {
-            // Only a candidate that differs from stable represents a transition
-            // still waiting to be accepted.
             if (self.candidate ^ self.stable) & (1 << bit) != 0 {
                 pending = true;
                 soonest = soonest.min(since.saturating_add(DEBOUNCE_MS));
@@ -104,30 +93,20 @@ mod tests {
         assert_eq!(d.update(25, 0), 0);
     }
 
-    // The sample sequence an interrupt-driven loop actually produces: wake on
-    // INT, read, then wake again at the settle deadline because no further
-    // interrupt arrives while the key is held steady. Without that second wake
-    // the press never registers -- which is exactly how it came to lose keys and
-    // leave them stuck.
-
     #[test]
     fn interrupt_driven_sampling_sees_a_press_and_its_release() {
         let mut d = Debouncer::default();
         d.update(0, 0);
         assert_eq!(d.next_settle(0), None, "idle has nothing pending");
 
-        // Press: INT wakes us and we read the raw transition, too early to
-        // accept.
         assert_eq!(d.update(100, 1), 0);
         let settle = d
             .next_settle(100)
             .expect("a pending transition must schedule a resample");
         assert_eq!(settle, DEBOUNCE_MS);
-        // The second wake accepts the press.
         assert_eq!(d.update(100 + settle, 1), 1);
         assert_eq!(d.next_settle(120), None, "settled, nothing pending");
 
-        // Release has the same shape, and must also produce its keyup.
         assert_eq!(d.update(500, 0), 1);
         let settle = d
             .next_settle(500)
@@ -138,8 +117,6 @@ mod tests {
 
     #[test]
     fn a_blip_shorter_than_the_debounce_window_still_produces_no_key() {
-        // The opposite direction: fixing the lost press must not turn every
-        // sub-20ms contact into a keystroke.
         let mut d = Debouncer::default();
         d.update(0, 0);
         d.update(100, 1);

@@ -4,26 +4,19 @@ version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-# Embassy async runtime + RP2350 HAL
-# `executor-interrupt` is deliberately not enabled: nothing spawns at interrupt
-# priority (no `send_priority` anywhere), and the feature pulls in the interrupt-mode
-# executor machinery for nothing. Add it back with the task that needs it.
 embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.10", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa", "binary-info"] }
 embassy-sync = { version = "0.8", features = ["defmt"] }
-# Patched below too: the embassy crates depend on embassy-futures by path inside the
-# embassy repo, so leaving this on crates.io links two copies of it.
+# Patched below: the embassy crates pull it by path, so crates.io here would double-link it.
 embassy-futures = "0.1"
 embassy-usb = { version = "0.6", features = ["defmt"] }
 embedded-storage-async = "0.4"
 
-# Bluetooth (CYW43 controller + Trouble BLE host)
 cyw43 = { version = "0.7", features = ["defmt", "firmware-logs", "bluetooth"] }
 cyw43-pio = { version = "0.10", features = ["defmt"] }
 trouble-host = { version = "0.8", features = ["default-packet-pool-mtu-128", "defmt", "security", "serde"] }
 
-# Utilities
 serde = { version = "1", default-features = false, features = ["derive"] }
 sequential-storage = { version = "8", default-features = false, features = ["postcard"] }
 defmt = "1.0"
@@ -33,44 +26,28 @@ panic-probe = { version = "1.0", features = ["print-defmt"] }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 static_cell = "2"
-# Native atomics on RP2350. No `critical-section` feature here: embassy-rp already
-# provides the critical-section impl, and Cargo feature unification would turn a
-# second provider on for every consumer (static_cell, usb-device).
+# No `critical-section` feature: embassy-rp already provides the impl.
 portable-atomic = "1.5"
 
 [profile.release]
 debug = 2
-# Measured on this tree, DEFMT_LOG=info:
-#   lto=false, codegen-units=16  683,688 bytes text+data  (the old default)
-#   lto="thin", codegen-units=1  652,424                -31,264  (-4.6%)
-#   lto="fat",  codegen-units=1  642,484                -41,204  (-6.0%)
-#   lto="fat",  cg=1, panic=abort 642,480                 -41,208  (-6.0%)
-# Fat LTO wins on cross-crate inlining and dead-code removal across the
-# embassy/trouble-host tree. `panic = "abort"` was measured too: four bytes,
-# nowhere near worth the panic backtraces it deletes.
+# Measured at DEFMT_LOG=info: fat -6.0%, thin -4.6% of text+data vs the old
+# non-LTO default. `panic = "abort"` was worth 4 bytes and was not taken.
 lto = "fat"
 codegen-units = 1
 
-# Bench build: same source and log-level story as `release`, but deliberately NOT
-# LTO'd. Fat LTO inlines across crates and collapses the frames probe-rs
-# reports, which is the opposite of what you want while chasing a panic on the
-# bench, and it slows rebuilds. Its own profile so the quiet ship image and the
-# chatty bench image land in separate target dirs; otherwise flipping DEFMT_LOG
-# recompiles the whole embassy/trouble-host tree every time. Cargo cannot scope
-# env vars to a profile, so the level itself is set by the justfile recipes.
+# Bench build: no LTO so probe-rs still reports real frames, and its own target
+# dir so flipping DEFMT_LOG does not rebuild the tree. The justfile sets the level,
+# which is the only way to scope it to a profile.
 [profile.diagnostic]
 inherits = "release"
 lto = false
 codegen-units = 16
 
-# Align cyw43 + embassy with the bt-hci-transport 0.1 model used by trouble-host 0.8.
-# Matches the trouble repo's rp-pico-2-w example.
-#
-# Bump every rev below in one commit. Cargo has no variables here, and a mixed-rev
-# set will not resolve. The `version` fields in [dependencies] are constraints only
-# for these crates -- the rev is authoritative -- so a rev whose crates declare a
-# higher version than the pinned constraint fails resolution with a confusing error
-# that points at [dependencies], not at this section.
+# Align cyw43 + embassy with the bt-hci-transport 0.1 model trouble-host 0.8 expects.
+# Bump every rev in one commit: the rev is authoritative and the `version` fields
+# above are only constraints, so a mixed-rev set fails resolution pointing at
+# [dependencies] rather than here.
 [patch.crates-io]
 cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
@@ -82,15 +59,9 @@ embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e
 embassy-usb-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 
-# Lint gate: `cargo clippy` must stay clean. Cast lints are deliberately not
-# allowed here; scope any exception to the module that needs it (config_store.rs,
-# host_slots.rs).
-#
-# `forbid` rather than `deny` is deliberate: this firmware should never need unsafe,
-# and a crate-wide forbid means any future unsafe forces a visible, reviewable edit
-# to this file instead of a local `#[allow(unsafe_code)]`. If unsafe ever becomes
-# genuinely required, change this to "deny" here first. The justfile mirrors this
-# with `-F unsafe_code` for the standalone host-module lint.
+# Cast-lint exceptions are scoped to the modules that need them. `forbid` (not
+# `deny`) so any future unsafe forces a visible edit here rather than a local
+# allow; the justfile mirrors it with `-F unsafe_code` for the standalone lint.
 [lints.rust]
 unsafe_code = "forbid"
 

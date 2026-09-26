@@ -1,14 +1,7 @@
-# Pinned toolchain. The firmware builds against a git rev of embassy (see
-# firmware/Cargo.toml [patch.crates-io]), so the compiler is part of the pinned
-# toolchain story, not just the dependency versions.
-#
-# Pinning also contains the `proc-macro-error2 2.0.1` future-incompatibility
-# (E0365, pulled transitively via pio-proc <- pio <- embassy-rp). That crate is at
-# its latest published version with no fix available, so the pin is what keeps the
-# build green; bump deliberately, not by accident.
-#
-# rustup installs the target and components listed here automatically on the first
-# build, so no manual `rustup target add` is needed.
+# The compiler is part of the pin: the firmware builds against a git rev of embassy
+# (firmware/Cargo.toml [patch.crates-io]). This channel is also what contains the
+# `proc-macro-error2 2.0.1` future-incompat (E0365, via pio-proc <- pio <-
+# embassy-rp), which has no upstream fix -- bump deliberately.
 [toolchain]
 channel = "1.98.1"
 targets = ["thumbv8m.main-none-eabihf"]

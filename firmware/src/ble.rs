@@ -1,15 +1,10 @@
-//! BLE HOGP (HID over GATT) peripheral.
-//!
-//! Exposes the Human Interface Device service (0x1812) with a single report-protocol keyboard
-//! input report, plus a minimal Device Information service (0x180A) carrying the
-//! `PnP` ID required by HOGP. HID access is encrypted and pairing bonds are persisted.
+//! BLE HOGP (HID over GATT) peripheral: the Human Interface Device service
+//! (0x1812) with keyboard and consumer input reports, plus a Device Information
+//! service (0x180A) carrying the `PnP` ID HOGP requires. HID access is encrypted
+//! and pairing bonds are persisted.
 
-// `#[gatt_server]`/`#[gatt_service]` rebuild these structs and drop per-field
-// attributes, so service fields the app never reads directly (`hid`, `dis`) are
-// reported dead even though the generated registration uses them. A field-level
-// or struct-level `#[allow(dead_code)]` does not survive the macro expansion, so
-// this has to sit at module scope. The cost is that a genuinely unused item
-// elsewhere in this file is silenced too.
+// The gatt macros rebuild these structs and drop per-field attributes, so `hid`
+// and `dis` read as dead even though the generated registration uses them.
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn};
@@ -27,11 +22,6 @@ use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
-///
-/// The `#[allow(dead_code)]` here is redundant with the module-level one; it is
-/// kept because the field it protects (`hid`) is only reachable through code the
-/// `#[gatt_server]` macro generates.
-#[allow(dead_code)]
 #[gatt_server]
 pub struct Server {
     hid: HidService,
@@ -58,12 +48,9 @@ struct HidService {
     #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x01u8, 0x01])]
     report: [u8; REPORT_LEN],
 
-    /// Consumer / media input report (Report ID 2). One consumer usage per
-    /// report, on usage page 0x0C -- see the second collection in `REPORT_MAP`.
-    ///
-    /// A separate characteristic with its own Report Reference descriptor is how
-    /// HOGP carries a second report type. The host tells the two apart by the
-    /// Report ID in the reference descriptor, not by UUID.
+    /// Consumer / media input report (Report ID 2): one usage page 0x0C bitmask
+    /// per report. HOGP carries a second report type in a separate
+    /// characteristic; the host tells them apart by the Report Reference ID.
     #[characteristic(uuid = characteristic::REPORT, read, notify, value = [0u8; CONSUMER_REPORT_LEN], permissions(encrypted))]
     #[descriptor(uuid = descriptors::REPORT_REFERENCE, read = encrypted, value = [0x02u8, 0x01])]
     consumer_report: [u8; CONSUMER_REPORT_LEN],
@@ -78,14 +65,9 @@ struct DisService {
     #[characteristic(uuid = characteristic::MODEL_NUMBER_STRING, read, value = "Pico RGB Keypad")]
     model: &'static str,
 
-    /// `PnP` ID: vendor source 0x02 (USB-IF), VID 0x2E8A, PID 0x000A, ver 0x0100.
-    ///
-    /// The PID matches the one in the USB descriptor. HOGP says a device that is
-    /// also a USB device reports the same VID/PID on both transports, so a host
-    /// correlating the two sees one product rather than two. It used to be
-    /// 0x0001 here, which did not match. macOS caches this characteristic
-    /// against the existing bond, so a host paired before this change may keep
-    /// reporting the old value until it is re-paired.
+    /// `PnP` ID: source 0x02 (USB-IF), VID 0x2E8A, PID 0x000A, ver 0x0100.
+    /// Pre: the PID matches the USB descriptor, so a host correlating both
+    /// transports sees one product. macOS caches this per bond.
     #[characteristic(uuid = characteristic::PNP_ID, read, value = [0x02u8, 0x8a, 0x2e, 0x0a, 0x00, 0x00, 0x01])]
     pnp_id: [u8; 7],
 }
@@ -93,19 +75,14 @@ struct DisService {
 /// Service UUID advertised so hosts can discover the HID service.
 const HID_SERVICE_UUID: &[[u8; 2]] = &[[0x12, 0x18]];
 
-/// Advertisement interval while a slot still needs pairing, or in the window right
-/// after a link drops. Matches the trouble-host default.
+/// Advertisement interval while a slot still needs pairing or just lost its link.
 const ADV_INTERVAL_FAST: Duration = Duration::from_millis(160);
 
 /// Advertisement interval for a bonded slot that has been sitting disconnected.
-/// Five times slower than `ADV_INTERVAL_FAST`, at the cost of a second or two of
-/// extra reconnect latency.
 const ADV_INTERVAL_IDLE: Duration = Duration::from_millis(800);
 
-/// Advertisement interval for the current bond state and idle streak.
-///
-/// The cycle count that gates the fast window lives with the decision itself, in
-/// [`host_slots::advertise_fast`].
+/// Advertisement interval for the current bond state and idle streak; the cycle
+/// count that gates the fast window lives in [`host_slots::advertise_fast`].
 #[must_use]
 fn adv_interval(bonded: bool, fast_cycles: u32) -> Duration {
     if host_slots::advertise_fast(bonded, fast_cycles) {
@@ -115,8 +92,8 @@ fn adv_interval(bonded: bool, fast_cycles: u32) -> Duration {
     }
 }
 
-/// Storage-fault mode: no BLE identity is advertised and no empty bond set is
-/// substituted. USB runs alongside this loop, independently of radio startup.
+/// Storage-fault mode: no BLE identity is advertised, no empty bond set is
+/// substituted. USB runs alongside this loop.
 pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'static>) -> ! {
     let mut controls = recovery::Controls::default();
     let mut last_color = None;
@@ -160,8 +137,6 @@ pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'stat
                     }
                     restart().await;
                 } else {
-                    // `restart()` diverges, so a success can never log a failure
-                    // underneath it.
                     warn!("host recovery failed; release keys before trying again");
                 }
             }
@@ -170,15 +145,9 @@ pub async fn recover(mut keypad: Keypad<'static>, mut backlight: Backlight<'stat
     }
 }
 
-/// Blue pulse before the reboot that follows a bond reset.
-///
-/// A host cannot be told its bond is gone: the central owns its bond store and a
-/// peripheral cannot invalidate a pairing it does not hold. All this device can
-/// do is refuse the reconnect, which the host sees as a generic authentication
-/// failure -- and macOS keeps the dead pairing and retries it silently. The
-/// device is therefore the only place this can be communicated, so say it as
-/// loudly as we can: every host that ever paired must "forget" this device
-/// before it can pair again.
+/// Blue pulse before the reboot that follows a bond reset: a peripheral cannot
+/// invalidate a bond it does not hold, so every previously paired host must
+/// "forget" this device before it can pair again.
 async fn flash_bonds_cleared(backlight: &mut Backlight<'static>) {
     for _ in 0..4 {
         let _ = backlight.write(&[[0, 0, 120]; NUM_LEDS]).await;
@@ -242,14 +211,8 @@ async fn app_loop<C: Controller>(
 ) {
     let mut adv_data = [0u8; 31];
     let mut adv_name_buf = [0u8; host_slots::MAX_ADV_NAME_LEN];
-    // Advertisement cycles spent at the fast interval. Reset on every accepted
-    // connection so a pad that just dropped its link stays easy to find for a
-    // while before settling down.
     let mut fast_cycles = 0u32;
     loop {
-        // Rebuilt each iteration so the advertised name tracks the current bond
-        // state: after a pairing completes or a slot is cleared, the next
-        // advertisement says so instead of carrying a stale name until reboot.
         let bonded = hosts.bonds[hosts.active as usize].is_some();
         let adv_name = host_slots::adv_name(hosts.active, bonded, &mut adv_name_buf);
         let n = AdStructure::encode_slice(
@@ -268,8 +231,8 @@ async fn app_loop<C: Controller>(
             interval_max: interval,
             ..AdvertisementParameters::default()
         };
-        // Everything lives inside the macro so a ship build at a higher log level
-        // compiles the whole thing away rather than leaving the decode behind.
+        // Inside the macro so a ship build at a higher log level compiles the
+        // decode away too.
         debug!(
             "advertising as \"{}\" (bonded={}, {} ms interval, {} of 31 advertisement bytes)",
             core::str::from_utf8(adv_name).unwrap_or("<not utf8>"),
@@ -309,8 +272,6 @@ async fn app_loop<C: Controller>(
         .await
         {
             Either3::First(Ok(conn)) => {
-                // A link came up, so the next time we are disconnected the host is
-                // likely still around and should find us quickly.
                 fast_cycles = 0;
                 if let Some(bond) = &hosts.bonds[hosts.active as usize]
                     && !bond.identity.match_identity(&conn.peer_identity())
@@ -391,8 +352,6 @@ async fn connection_task(
     hosts: &mut HostSlots,
     ui: &mut KeypadUi,
 ) -> Option<Action> {
-    // Bound here rather than in the signature so the call site stays on one
-    // line: app_loop is close to clippy's line limit.
     let report = &hid.report;
     let consumer_report = &hid.consumer_report;
     let mut last_report = None;
@@ -435,13 +394,13 @@ async fn connection_task(
                     continue;
                 };
                 if let Some(action) = input.action {
-                    // A released report prevents modifiers/keys sticking on the old host.
+                    // Released reports stop modifiers and media keys sticking on
+                    // the old host.
                     let _ = with_timeout(
                         Duration::from_millis(100),
                         report.notify(gatt, &[0; REPORT_LEN], true),
                     )
                     .await;
-                    // Same for a media key held across a slot switch.
                     let _ = with_timeout(
                         Duration::from_millis(100),
                         consumer_report.notify(gatt, &[0; CONSUMER_REPORT_LEN], true),
@@ -454,15 +413,10 @@ async fn connection_task(
                     build_reports(input.keys, &cfg.keymap, cfg.consumer_mask)
                 };
 
-                // Each report is tracked and sent independently. A host may
-                // subscribe to one and not the other, and the two change on
-                // different keys, so they must not gate each other.
-                //
-                // The `!should_notify` arm deliberately does not send: it only
-                // clears the memo so that when the host *does* subscribe the
-                // current state goes out even if nothing has been pressed since
-                // connection. Notifying unconditionally here would spam on every
-                // idle poll.
+                // Each report is tracked and sent independently: a host may
+                // subscribe to one and not the other. The `!should_notify` arm
+                // only clears the memo, so the current state still goes out when
+                // the host subscribes later.
                 if !report.should_notify(gatt) {
                     last_report = None;
                 } else if last_report != Some(value) {
@@ -510,33 +464,19 @@ struct KeypadUi {
     router: crate::routing::Router,
     last_leds: Option<[[u8; 3]; NUM_LEDS]>,
     last_brightness: u8,
-    /// Timestamp of the most recent key press. Drives the idle backlight blank.
     last_activity: u64,
-    /// Whether the backlight is currently blanked. Tracked so the sleep budget
-    /// stops reserving the idle deadline once the LEDs are already off.
     blanked: bool,
 }
 
 impl KeypadUi {
     /// How long the input loop may sleep before it must wake anyway.
-    ///
-    /// Three things bound it and the smallest wins:
-    ///
-    /// * the control state machine's next timer-driven transition (hold
-    ///   thresholds, menu expiry). Without this a held key would never reach its
-    ///   3 s threshold, because a key that is merely *held* never toggles INT.
-    /// * the backlight idle deadline -- but only while the LEDs are still lit,
-    ///   otherwise a past deadline would pin the budget at zero.
-    /// * `SAFETY_POLL_MS`, so a lost interrupt degrades to a slow poll instead
-    ///   of a dead keyboard.
+    /// Post: the minimum of the control state machine's next deadline, the LED
+    /// idle deadline (only while lit) and `SAFETY_POLL_MS`, and never below 1.
     fn sleep_budget(&self, now: u64) -> u64 {
         let mut budget = SAFETY_POLL_MS;
         if let Some(until) = self.controls.next_deadline(now) {
             budget = budget.min(until);
         }
-        // The debouncer needs one more sample ~DEBOUNCE_MS after a transition,
-        // and no interrupt is coming to provide it once the line has gone quiet.
-        // Omitting this is what made presses vanish and keys stick.
         if let Some(settle) = self.keypad.next_settle(now) {
             budget = budget.min(settle);
         }
@@ -544,7 +484,6 @@ impl KeypadUi {
             let idle = (self.last_activity + host_slots::LED_IDLE_OFF_MS).saturating_sub(now);
             budget = budget.min(idle);
         }
-        // A zero budget would turn the event loop into a busy spin.
         budget.max(1)
     }
 
@@ -552,8 +491,6 @@ impl KeypadUi {
     async fn wait_keypad(&mut self) {
         let budget = self.sleep_budget(Instant::now().as_millis());
         let wake = self.keypad.wait_change(budget).await;
-        // Compiles away at ship log level; the bench build uses this to tell a
-        // working INT line apart from the safety timer papering over a dead one.
         debug!("keypad wake: {} (budget {} ms)", wake, budget);
     }
 
@@ -592,10 +529,6 @@ impl KeypadUi {
         let blank = host_slots::backlight_blank(now, self.last_activity, input.menu);
         self.blanked = blank;
         if input.menu != Menu::Closed {
-            // Management feedback must be readable regardless of the user's
-            // backlight setting. The old floor of 8 (~26% on the APA102's 0..31
-            // scale) left the hold fill effectively invisible: the ramp peaked at
-            // rgb [168,74,0] and still read as nothing on the bench.
             brightness = brightness.max(24);
             let colors = host_slots::menu_colors(
                 core::array::from_fn(|i| hosts.bonds[i].is_some()),
@@ -604,17 +537,11 @@ impl KeypadUi {
                 now,
                 slot_colors,
             );
-            // LED index == physical key bit index: the 16 keys sit on the TCA9555's
-            // 16 GPIOs and the APA102 chain is wired in the same order, so a key's
-            // bit position is also its LED position. Verified on hardware for the
-            // slot keys (bits/LEDs 8, 9, 10) and the `+` key (bit/LED 15).
+            // LED index == physical key bit index on this board.
             for (i, key) in SLOT_KEYS.iter().enumerate() {
                 leds[key.trailing_zeros() as usize] = colors[i];
             }
             if let Menu::Entering(progress) = input.menu {
-                // Fill the key the user is actually holding. During the three
-                // second `+` hold this is the only feedback that the gesture was
-                // registered and that they should keep pressing.
                 leds[host_slots::PLUS.trailing_zeros() as usize] = host_slots::enter_fill(progress);
             }
         } else if mode != led_mode::OFF && !blank {
@@ -632,8 +559,6 @@ impl KeypadUi {
                 };
             }
             if !connected {
-                // Same identity colour, brightness still carrying bond state, so
-                // "which slot am I" reads the same whether linked or not.
                 leds[SLOT_KEYS[hosts.active as usize].trailing_zeros() as usize] =
                     host_slots::scale(
                         slot_colors[hosts.active as usize],

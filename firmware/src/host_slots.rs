@@ -1,7 +1,7 @@
 //! Persistent host selection and physical-key controls, independent of the BLE HAL.
 
-// Slot ids are `u8` (persisted and handed to the BLE layer) while array indices
-// are `usize`; SLOT_COUNT is 3, so these narrowings cannot truncate.
+// Slot ids are u8 (persisted and handed to the BLE layer) and SLOT_COUNT is 3,
+// so the narrowings below cannot truncate.
 #![allow(clippy::cast_possible_truncation)]
 
 pub const SLOT_COUNT: usize = 3;
@@ -14,34 +14,25 @@ const MENU_TIMEOUT_MS: u64 = 10_000;
 /// chance to emit it before the state machine returns to `Ready`.
 const TAP_HOLD_MS: u64 = 30;
 
-/// Blank the backlight after this long with no key activity.
-///
-/// The 16 APA102s are the largest single consumer on the board -- full white is
-/// on the order of 700mA, well above the whole BLE link -- so switching them off
-/// outright when nobody is using the pad is the biggest power lever available.
+/// Blank the backlight after this long with no key activity. The 16 APA102s are
+/// the board's largest single draw (~700mA at full white).
 pub const LED_IDLE_OFF_MS: u64 = 60_000;
 
-/// Advertisement cycles a bonded slot keeps the fast interval before settling.
-/// Each cycle is roughly a second, so about half a minute of easy discovery
-/// after boot or a link drop.
+/// Advertisement cycles a bonded slot keeps the fast interval before settling
+/// (~30s of easy discovery after boot or a link drop).
 pub const ADV_FAST_CYCLES: u32 = 30;
 
 /// Whether a slot should advertise at the fast interval.
-///
-/// An unbonded slot always advertises fast: someone is actively trying to pair
-/// with it, and slow discovery just reads as a broken device. A bonded slot only
-/// has to be found by a host that already knows it, so after `ADV_FAST_CYCLES`
-/// it settles back, trading a second or two of reconnect latency for radio time.
+/// Post: unbonded slots always advertise fast; bonded ones stop after
+/// `ADV_FAST_CYCLES`.
 #[must_use]
 pub const fn advertise_fast(bonded: bool, fast_cycles: u32) -> bool {
     !bonded || fast_cycles < ADV_FAST_CYCLES
 }
 
 /// Whether the backlight may blank.
-///
-/// An open menu suppresses blanking. Blanking mid-gesture would hide exactly the
-/// hold-progress feedback the user is relying on, and the hold can outlast the idle
-/// timeout while a key is deliberately being held down for three seconds.
+/// Post: true only with `Menu::Closed` and `LED_IDLE_OFF_MS` of inactivity; an
+/// open menu never blanks, so a hold's progress fill stays visible.
 #[must_use]
 pub fn backlight_blank(now: u64, last_activity: u64, menu: Menu) -> bool {
     menu == Menu::Closed && now.saturating_sub(last_activity) >= LED_IDLE_OFF_MS
@@ -94,29 +85,14 @@ pub fn name(slot: u8) -> &'static str {
 /// Appended to the advertised name while a slot holds no bond.
 pub const PAIRING_SUFFIX: &str = "-pairing";
 
-/// Longest advertised local name that still fits the 31-byte legacy advertising
-/// payload alongside everything else we send: 3 (flags) + 4 (16-bit HID service
-/// UUID) + 2 (name AD header) = 9, leaving 22.
+/// Longest advertised local name that fits the 31-byte legacy payload alongside
+/// the rest: 3 (flags) + 4 (16-bit HID UUID) + 2 (name header) = 9, leaving 22.
 pub const MAX_ADV_NAME_LEN: usize = 22;
 
-/// Write the advertised local name for `slot` into `buf` and return the filled
-/// prefix. An unbonded slot carries `PAIRING_SUFFIX`.
-///
-/// Why the bond state is in the name at all: a host cannot be *told* that its
-/// bond is gone. The central owns its bond store and BLE gives a peripheral no
-/// way to invalidate a pairing it does not hold. When a stale host-side bond
-/// tries to reconnect, all this device can do is refuse -- trouble-host
-/// disconnects with `AuthenticationFailure` -- and macOS in particular keeps the
-/// dead pairing and silently retries it forever. The advertised name is the only
-/// signal about bond state that reliably reaches a human on the host.
-///
-/// Only the advertised name varies. The GATT Generic Access device name stays the
-/// stable identity from `name()`.
-///
+/// Write the advertised local name for `slot` into `buf`; `PAIRING_SUFFIX` is
+/// appended while unbonded. The GATT Generic Access name stays stable.
 /// # Panics
-///
-/// If `buf` is shorter than the name. Callers size it from `MAX_ADV_NAME_LEN`, so
-/// this is a programming error rather than a runtime condition.
+/// If `buf` is shorter than the name -- callers size it from `MAX_ADV_NAME_LEN`.
 #[must_use]
 pub fn adv_name(slot: u8, bonded: bool, buf: &mut [u8]) -> &[u8] {
     let base = name(slot).as_bytes();
@@ -153,23 +129,18 @@ impl Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Closed,
-    /// `+` is being held toward opening the menu. Carries 0..=100 progress so the
-    /// LED can fill: without it a three-second hold looks completely dead and the
-    /// user has no way to learn the gesture exists.
+    /// `+` held toward opening the menu, carrying 0..=100 hold progress.
     Entering(u8),
     Open,
-    /// A slot key is held. Carries 0..=100 progress toward the destructive clear
-    /// at `CLEAR_HOLD_MS` -- releasing below the threshold only selects the slot,
-    /// holding to full wipes its bond, so the user must be able to tell how much
-    /// is left.
+    /// A slot key held, carrying 0..=100 progress toward the destructive clear
+    /// at `CLEAR_HOLD_MS`; releasing below the threshold only selects.
     Holding {
         slot: u8,
         progress: u8,
     },
 }
 
-/// Percent (0..=100) of the way through a hold of `hold_ms` that began at
-/// `since`. Drives the fill so a long press tells the user to keep going.
+/// Percent (0..=100) of the way through a hold of `hold_ms` begun at `since`.
 #[must_use]
 pub fn hold_progress(since: u64, now: u64, hold_ms: u64) -> u8 {
     if hold_ms == 0 {
@@ -181,9 +152,8 @@ pub fn hold_progress(since: u64, now: u64, hold_ms: u64) -> u8 {
         .min(100) as u8
 }
 
-/// Linear ramp between two endpoints by a 0..=100 percentage. The result is
-/// always between two `u8` endpoints, so the fallible conversion cannot fail in
-/// practice; `unwrap_or` keeps it total without a sign-loss cast.
+/// Linear ramp between two `u8` endpoints by a 0..=100 percentage. Post: the
+/// result always lies between the endpoints, so the conversion cannot fail.
 #[must_use]
 fn ramp(from: u8, to: u8, progress: u8) -> u8 {
     let p = i32::from(progress);
@@ -193,11 +163,8 @@ fn ramp(from: u8, to: u8, progress: u8) -> u8 {
 }
 
 /// Idle tint level: the configured slot colour scaled to this brightness.
-/// Chosen so the field reads as tinted without competing with a pressed key.
 pub const IDLE_LEVEL: u8 = 12;
 
-/// Menu brightness levels. Bond status is carried by brightness now that hue
-/// is spent on slot identity, so bonded and empty must stay far apart.
 const MENU_BONDED_LEVEL: u8 = 100;
 const MENU_EMPTY_LEVEL: u8 = 28;
 /// The active slot pulses by dropping to a quarter of its own level.
@@ -213,27 +180,16 @@ pub const fn scale(c: [u8; 3], level: u8) -> [u8; 3] {
     ]
 }
 
-/// Color of the `+` key while its hold is still building. The key the user is
-/// actually pressing ramps up in amber -- the same "a control is being held"
-/// family the slot keys use -- from dim to bright over the three seconds, which
-/// is the only signal that the gesture registered and they should keep going.
+/// The `+` key while its hold builds: amber, ramping dim to bright.
 #[must_use]
 pub fn enter_fill(progress: u8) -> [u8; 3] {
     [ramp(90, 255, progress), ramp(40, 130, progress), 0]
 }
 
-/// Menu colours follow each slot's own identity colour, so the hue you picked
-/// for slot 2 is the hue you see while choosing between slots -- not green and
-/// blue, which said nothing about which slot was which.
-///
-/// Bond status moves to brightness: bonded is bright, empty is dim. The
-/// active slot pulses by dropping to a quarter of its own level, which stays
-/// distinguishable from an empty slot because it pulses from a higher base.
-///
-/// A held slot still ramps amber to red regardless of its identity colour.
-/// That cue is about to destroy a bond and must not be recoloured by a
-/// preference -- if slot 3 is yellow, a yellow key must not also mean
-/// "release now or you lose this host".
+/// Menu colours: identity hue per slot, bond state in brightness (bonded
+/// bright, empty dim), active slot pulsing down from its own base.
+/// Post: a held slot renders amber->red regardless of its identity colour, so a
+/// user preference can never disguise the destructive gesture.
 #[must_use]
 pub fn menu_colors(
     bonded: [bool; SLOT_COUNT],
@@ -318,7 +274,6 @@ impl Controls {
             }
             State::PlusPending(since) => {
                 if pressed == 0 {
-                    // A short tap still types the configured usage for the + key.
                     self.state = State::PlusTap(now);
                     input.keys = PLUS;
                 } else if pressed != PLUS {
@@ -328,13 +283,10 @@ impl Controls {
                     self.state = State::MenuRelease;
                     input.menu = Menu::Open;
                 } else {
-                    // Report progress while the hold is still building so the LED
-                    // can fill. Without this the key looks inert for three seconds.
                     input.menu = Menu::Entering(hold_progress(since, now, MENU_HOLD_MS));
                 }
             }
             State::PlusTap(since) => {
-                // Keep a tap visible long enough for the BLE task to send it.
                 input.keys = pressed;
                 if now - since < TAP_HOLD_MS {
                     input.keys |= PLUS;
@@ -400,12 +352,8 @@ impl Controls {
 
     /// Milliseconds from `now` until `update` must run again even with no key
     /// change, or `None` when the state machine can idle indefinitely.
-    ///
-    /// The interrupt-driven input loop sleeps until this deadline. Every
-    /// time-based transition in `update` has to be mirrored here: a state that
-    /// owns a timer but reports `None` freezes that timer until some unrelated
-    /// event wakes the loop. That is the whole risk of this design, so the
-    /// mapping is asserted by tests rather than trusted.
+    /// Post: every state that owns a timer reports it; states waiting only on a
+    /// key release report `None`. The tests below pin that mapping down.
     #[must_use]
     pub fn next_deadline(&self, now: u64) -> Option<u64> {
         let due = match self.state {
@@ -453,8 +401,6 @@ mod tests {
         let mut c = Controls::new();
         c.update(0, 0);
         c.update(1, PLUS);
-        // The hold reports progress rather than staying Closed, so the LED can
-        // tell the user the gesture registered and they should keep pressing.
         assert_eq!(c.update(1_001, PLUS).menu, Menu::Entering(33));
         assert_eq!(c.update(3_000, PLUS).menu, Menu::Entering(99));
         assert_eq!(c.update(3_001, PLUS).menu, Menu::Open);
@@ -471,13 +417,10 @@ mod tests {
         let mut d = debounce::Debouncer::default();
         d.update(3_002, 0);
         let key = SLOT_KEYS[1];
-        // Press, momentary open contact, then continued hold. Feed the actual
-        // debouncer output to the menu, as Keypad::read_pressed does on device.
         for (time, raw) in [(4_000, key), (4_005, 0), (4_010, key), (4_029, key)] {
             assert_eq!(c.update(time, d.update(time, raw)).action, None);
         }
         assert_eq!(c.update(4_030, d.update(4_030, key)).action, None);
-        // A further short bounce during the hold must not count as a release.
         assert_eq!(c.update(4_100, d.update(4_100, 0)).action, None);
         assert_eq!(c.update(4_105, d.update(4_105, key)).action, None);
         assert_eq!(c.update(7_029, d.update(7_029, key)).action, None);
@@ -565,8 +508,6 @@ mod tests {
         }
     }
 
-    /// The tint and the menu both scale one configured colour, so `scale` has
-    /// to be exact at the ends and proportional in between.
     #[test]
     fn scale_is_exact_at_the_ends_and_proportional_between() {
         let c = [255u8, 128, 64];
@@ -576,12 +517,9 @@ mod tests {
         assert_eq!(scale([0, 0, 0], 255), [0, 0, 0], "black stays black");
     }
 
-    /// Slot identity has to survive into the menu: the hue you configured for a
-    /// slot is the hue you see while choosing slots.
     #[test]
     fn menu_keeps_each_slots_own_hue_and_uses_brightness_for_bond_state() {
         let colors = [[255, 0, 216], [0, 216, 255], [255, 216, 0]];
-        // slot 9 is never active, so nothing pulses and levels are steady
         let c = menu_colors([true, false, true], 9, Menu::Open, 0, colors);
         let empty: [[u8; 3]; SLOT_COUNT] =
             core::array::from_fn(|i| scale(colors[i], MENU_EMPTY_LEVEL));
@@ -589,10 +527,6 @@ mod tests {
         assert_eq!(c[1], scale(colors[1], MENU_EMPTY_LEVEL));
         assert_eq!(c[2], scale(colors[2], MENU_BONDED_LEVEL));
 
-        // Bond status is carried by brightness now that hue is spent on slot
-        // identity, so a bonded slot has to render clearly brighter than an
-        // empty one -- asserted on what actually reaches the LEDs, not on the
-        // level constants, which would pass no matter how they were set.
         for (i, is_bonded) in [true, false, true].iter().enumerate() {
             if !is_bonded {
                 continue;
@@ -608,8 +542,6 @@ mod tests {
         }
     }
 
-    /// The active slot pulses from its own base, so an active-but-empty slot
-    /// pulses down rather than up into bonded territory.
     #[test]
     fn the_active_slot_pulses_downward_from_its_own_level() {
         let colors = [[255, 0, 216], [0, 216, 255], [255, 216, 0]];
@@ -633,8 +565,6 @@ mod tests {
         );
     }
 
-    /// A destructive hold must not inherit the slot's colour. If slot 3 is
-    /// yellow, yellow must still never mean "about to wipe this host".
     #[test]
     fn a_destructive_hold_ignores_the_slot_colour_entirely() {
         let colors = [[255, 216, 0], [255, 216, 0], [255, 216, 0]];
@@ -691,7 +621,6 @@ mod tests {
         assert_eq!(hold_progress(0, 1_500, 3_000), 50);
         assert_eq!(hold_progress(0, 2_999, 3_000), 99);
         assert_eq!(hold_progress(0, 3_000, 3_000), 100);
-        // Never overshoot, and never wrap on a clock that went backwards.
         assert_eq!(hold_progress(0, 99_000, 3_000), 100);
         assert_eq!(hold_progress(5_000, 1_000, 3_000), 0);
         assert_eq!(hold_progress(0, 0, 0), 100);
@@ -732,7 +661,6 @@ mod tests {
             }
             other => panic!("expected Holding, got {other:?}"),
         }
-        // Still only a select at 2.9s, but the progress says "nearly there".
         assert_eq!(c.update(12_900, 0).action, Some(Action::Select(1)));
     }
 
@@ -759,7 +687,6 @@ mod tests {
             end[0] > start[0],
             "red climbs toward the destructive end: {start:?} -> {end:?}"
         );
-        // Monotonic in both channels so the ramp reads as continuous.
         let mut prev = at(0);
         for p in 1..=100 {
             let cur = at(p);
@@ -792,17 +719,10 @@ mod tests {
             "must visibly brighten: {start:?} -> {end:?}"
         );
         assert!(end[1] > start[1]);
-        // Amber, not white: red strictly dominates green, and blue stays off.
-        assert!(
-            start[0] > start[1] && end[0] > end[1],
-            "amber ramp, never white: {start:?} -> {end:?}"
-        );
+        assert!(start[0] > start[1] && end[0] > end[1], "amber, never white");
         assert_eq!(start[2], 0);
         assert_eq!(end[2], 0);
-        assert!(
-            start[0] > 0,
-            "visible even at zero progress, backlight may be off"
-        );
+        assert!(start[0] > 0, "visible even at zero progress");
     }
 
     #[test]
@@ -812,8 +732,6 @@ mod tests {
         assert!(!backlight_blank(t - 1, 0, Menu::Closed));
         assert!(backlight_blank(t, 0, Menu::Closed));
         assert!(backlight_blank(t * 10, 0, Menu::Closed));
-        // Measured from the last activity, not from boot: a press at t/2 pushes
-        // the blank out to 3t/2.
         assert!(!backlight_blank(t, t / 2, Menu::Closed));
         assert!(backlight_blank(t + t / 2, t / 2, Menu::Closed));
     }
@@ -821,8 +739,6 @@ mod tests {
     #[test]
     fn an_open_menu_never_blanks_mid_gesture() {
         let t = LED_IDLE_OFF_MS + 9_999;
-        // Every non-Closed menu state suppresses blanking: a three-second hold can
-        // outlast the idle timeout, and blanking then would hide the progress fill.
         assert!(!backlight_blank(t, 0, Menu::Open));
         assert!(!backlight_blank(t, 0, Menu::Entering(50)));
         assert!(!backlight_blank(
@@ -833,7 +749,6 @@ mod tests {
                 progress: 100
             }
         ));
-        // Only a closed menu may blank.
         assert!(backlight_blank(t, 0, Menu::Closed));
     }
 
@@ -842,10 +757,6 @@ mod tests {
         assert!(!backlight_blank(1_000, 5_000, Menu::Closed));
         assert!(!backlight_blank(0, u64::MAX, Menu::Closed));
     }
-
-    // The interrupt-driven input loop sleeps until `next_deadline`. A state that
-    // owns a timer but fails to report it freezes that timer until something else
-    // wakes the loop -- so every timed state is pinned down here.
 
     #[test]
     fn states_that_wait_on_a_release_report_no_deadline() {
@@ -862,7 +773,6 @@ mod tests {
         c.update(100, PLUS); // -> PlusPending(100)
         assert_eq!(c.next_deadline(100), Some(MENU_HOLD_MS));
         assert_eq!(c.next_deadline(100 + MENU_HOLD_MS - 1), Some(1));
-        // Already due: saturate rather than wrap around u64.
         assert_eq!(c.next_deadline(100 + MENU_HOLD_MS + 500), Some(0));
     }
 
@@ -892,7 +802,6 @@ mod tests {
 
     #[test]
     fn an_unbonded_slot_never_settles_its_advertisement() {
-        // Pairing has to stay easy however long the slot has sat empty.
         assert!(advertise_fast(false, 0));
         assert!(advertise_fast(false, ADV_FAST_CYCLES));
         assert!(advertise_fast(false, u32::MAX));

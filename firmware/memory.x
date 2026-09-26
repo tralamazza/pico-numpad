@@ -1,11 +1,7 @@
 MEMORY {
-    /*
-     * Pico 2 W has 4 MiB of flash. We cap the code region here and reserve the
-     * top 64 KiB (0x103F0000..) for the config store in a later phase.
-     */
+    /* Top 64 KiB is reserved for the config store; see config_store.rs. */
     FLASH : ORIGIN = 0x10000000, LENGTH = 4032K
 
-    /* RAM: 8 striped banks (SRAM0-7) for performance. */
     RAM : ORIGIN = 0x20000000, LENGTH = 512K
 
     /* Direct-mapped banks for dedicated use (e.g. per-core stacks). */
@@ -14,7 +10,7 @@ MEMORY {
 }
 
 SECTIONS {
-    /* Boot ROM info: keep in the first 4K of flash where the Boot ROM / picotool look. */
+    /* Boot ROM looks for this in the first 4K of flash. */
     .start_block : ALIGN(4)
     {
         __start_block_addr = .;
@@ -28,7 +24,6 @@ SECTIONS {
 _stext = ALIGN(ADDR(.start_block) + SIZEOF(.start_block), 8);
 
 SECTIONS {
-    /* Picotool 'Binary Info' entries. */
     .bi_entries : ALIGN(4)
     {
         __bi_entries_start = .;
@@ -39,7 +34,6 @@ SECTIONS {
 } INSERT AFTER .text;
 
 SECTIONS {
-    /* Boot ROM extra info / signature. */
     .end_block : ALIGN(4)
     {
         __end_block_addr = .;

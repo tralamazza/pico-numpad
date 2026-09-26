@@ -2,18 +2,16 @@
 
 /* ------------------------------------------------------------------ *
  * Wire protocol. Mirrors firmware/src/usb.rs and firmware/src/config.rs.
- * The config is a fixed 32-byte little-endian record:
+ * A fixed 32-byte little-endian record:
  *   [0]=magic 0xC0  [1]=version  [2..18]=keymap  [18]=brightness
  *   [19]=led_mode  [20..22]=consumer_mask  [22..31]=slot colours (3xRGB)
  *   [31]=checksum
- * Bytes we do not manage are carried through untouched on write, so a newer
- * firmware's reserved fields survive an edit from an older editor.
+ * Bytes we do not manage are carried through untouched on write.
  * ------------------------------------------------------------------ */
 const VENDOR_ID = 0x2e8a;
 const PRODUCT_ID = 0x000a;
 const IFACE = 1;
 // transferIn/transferOut take the endpoint *number*, not the USB address.
-// Bulk IN is 0x81 and bulk OUT is 0x01; both are endpoint number 1.
 const EP_IN = 1;
 const EP_OUT = 1;
 
@@ -26,12 +24,8 @@ const SLOT_COLORS_OFF = 22; // 3 slots x RGB, the last of the reserved space
 const CHECKSUM_OFF = 31;
 const VERSION = 3;
 const VERSION_CONSUMER = 2;
-// v1 records have no consumer mask; v1 and v2 have no slot colours. Both read
-// back as the defaults below, matching the firmware rather than the raw bytes,
-// which in an older record are reserved and mean nothing.
 
-// Must match DEFAULT_SLOT_COLORS in firmware/src/config.rs. The selftest parses
-// both and fails if they drift.
+// Must match DEFAULT_SLOT_COLORS in firmware/src/config.rs; the selftest fails on drift.
 const DEFAULT_SLOT_COLORS = [
   [255, 0, 216], // magenta
   [0, 216, 255], // cyan
@@ -166,10 +160,8 @@ const PRESETS = {
 /* ------------------------------------------------------------------ *
  * State
  * ------------------------------------------------------------------ */
-/* Factory defaults, mirroring firmware Config::default(). Seeding the working
- * copy with this means the grid shows a real layout before you connect instead
- * of sixteen "None" keys, which would read as a disabled device rather than an
- * unloaded one. Overwritten by the device's actual config on connect. */
+/* Factory defaults, mirroring firmware Config::default(). Overwritten by the
+ * device's actual config on connect. */
 function factoryBytes() {
   const b = new Uint8Array(CONFIG_LEN);
   b[0] = 0xc0; // magic
@@ -223,27 +215,18 @@ function checksum(bytes) {
   return s;
 }
 
-// factoryBytes() runs at declaration time above, so checksum must exist by then.
-// Function declarations hoist, so it does.
-
 function nameFor(code, isMedia) {
   const fallback = `0x${code.toString(16).padStart(2, "0")}`;
   if (isMedia) return MEDIA_NAME.get(code) ?? fallback;
   return USAGE_NAME.get(code) ?? fallback;
 }
 
-/* Consumer-page (0x0C) usages, checked against the USB-IF HID Usage Tables
- * rather than recalled -- 0xE5 is Bass Boost, not brightness, and 0x82 is
- * Mode Step, not System Wake Up. Codes are capped at 0xFF because the config
- * stores one byte per key; that is what excludes the 16-bit AL application
- * launch usages (0x18A Calculator, 0x196 Internet Browser). */
+/* Consumer-page (0x0C) usages, capped at 0xFF because the config stores one
+ * byte per key -- that is what excludes the 16-bit AL usages. Power (0x30) and
+ * Sleep (0x32) are deliberately absent: one press next to the volume keys must
+ * not be able to shut the host down. */
 const MEDIA_KEYS = [
-  // Keep in sync with CONSUMER_KEYS in firmware/src/hid.rs; the selftest parses
-  // both and fails if they disagree.
-  //
-  // Power (0x30) and Sleep (0x32) are deliberately absent. Both map to real
-  // shutdown/sleep key events on macOS and Linux, so a single press next to
-  // the volume keys could power off the host. They are not offered.
+  // Keep in sync with CONSUMER_KEYS in firmware/src/hid.rs; the selftest fails on drift.
   [0xcd, "Play / Pause", "⏯"],
   [0xb5, "Next Track", "⏭"],
   [0xb6, "Previous Track", "⏮"],
@@ -407,9 +390,8 @@ function renderSettings() {
   const led = draft[LEDMODE_OFF];
   const sel = $("ledMode");
   if (![...sel.options].some((o) => Number(o.value) === led)) {
-    // A stored LED mode with no matching <option> leaves select.value at "",
-    // and Number("") is 0 -- a later save would silently rewrite the device's
-    // LED mode to "Off". Synthesise the option instead.
+    // An unmatched stored mode leaves select.value at "", and Number("") is 0,
+    // which a later save would write back as "Off". Synthesise the option.
     const opt = document.createElement("option");
     opt.value = String(led);
     opt.textContent = `Unknown (${led})`;
@@ -507,15 +489,12 @@ async function recvResponse(expectedCmd = null) {
 
 function loadDraftFrom(bytes) {
   const b = bytes.slice(0, CONFIG_LEN);
-  // A v1 record has no consumer mask. Zero those bytes rather than carry
-  // whatever a future version left in them, matching what the firmware does on
-  // read so the editor and the device never disagree.
+  // Fields an older record does not have are reserved, not zero-valued: substitute
+  // the defaults, matching what the firmware does on read.
   if (b[1] < VERSION_CONSUMER) {
     b[CONSUMER_MASK_OFF] = 0;
     b[CONSUMER_MASK_OFF + 1] = 0;
   }
-  // Same for slot colours: an older record has reserved bytes there, not
-  // colours. Substituting the defaults is what the firmware does.
   if (b[1] < VERSION) {
     DEFAULT_SLOT_COLORS.forEach((c, i) => b.set(c, SLOT_COLORS_OFF + i * 3));
   }
@@ -580,8 +559,6 @@ function exportJson() {
     keymap: Array.from({ length: 16 }, (_, i) => ({
       physical: PHYS[i],
       usage: draft[KEYMAP_OFF + i],
-      // Without this flag a media key would round-trip out of the profile as a
-      // plain keyboard usage with the same numeric code.
       media: isMediaKey(i),
       name: nameFor(draft[KEYMAP_OFF + i], isMediaKey(i)),
     })),
@@ -606,8 +583,6 @@ function importJson(file) {
         p.keymap.forEach((entry, i) => {
           const usage = typeof entry === "object" ? entry.usage : entry;
           if (Number.isInteger(usage) && usage >= 0 && usage <= 0xff) next[KEYMAP_OFF + i] = usage;
-          // Set or clear explicitly per entry: leaving the mask alone would keep
-          // a stale media flag on a key the profile does not mention.
           maskSet(next, i, typeof entry === "object" && !!entry.media);
         });
       } else if (Array.isArray(p.raw) && p.raw.length === CONFIG_LEN) {
@@ -681,9 +656,8 @@ async function connect() {
     toast("WebUSB is not available in this browser. Use Chrome or Edge.", "err", 6000);
     return;
   }
-  // No withBusy() here on purpose: the click handler already wraps this call, so
-  // wrapping again would hit that guard's `if (busy) return` and bail out before
-  // requestDevice() ever ran -- the button would do nothing at all.
+  // No withBusy() here: the click handler already wraps this call, and a second
+  // guard would bail out before requestDevice() ever ran.
   device = await navigator.usb.requestDevice({
     filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }],
   });
@@ -704,13 +678,10 @@ function onDeviceGone() {
   toast("Device disconnected.", "warn");
 }
 
-// Disconnect events are fired by navigator.usb, not by the device: USBDevice
-// is not an EventTarget, so `device.addEventListener(...)` throws TypeError.
-// Registered once here rather than per-connect so repeated connects cannot
-// stack handlers.
+// Disconnect is fired by navigator.usb, not the device: USBDevice is not an
+// EventTarget. Registered once so repeated connects cannot stack handlers.
 if (navigator.usb) {
   navigator.usb.addEventListener("disconnect", (e) => {
-    // Only react to our own pad; other WebUSB devices may come and go.
     if (device && e.device === device) onDeviceGone();
   });
 }
@@ -723,9 +694,8 @@ async function disconnect() {
   capturing = false;
   setControls();
   try {
-    // Release the interface and close the handle. Leaving them claimed keeps the
-    // device held by this tab, so another origin (or a reload of this one)
-    // cannot open it until the tab is closed.
+    // Release the interface and close the handle, or the device stays claimed by
+    // this tab and nothing else can open it.
     await dying.releaseInterface(IFACE);
     await dying.close();
     setChip("", "Not connected");

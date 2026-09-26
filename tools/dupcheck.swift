@@ -1,30 +1,11 @@
 // dupcheck.swift -- host-side check for duplicate HID input across transports.
+// Taps every pico-numpad (vendor 0x2e8a) HID report via IOHIDManager, tags it
+// USB or Bluetooth Low Energy, and fails if the same key signature arrives on
+// both within a short window. Compared by signature, not raw bytes, so a framing
+// difference cannot mask a real duplicate. Needs macOS Input Monitoring; with it
+// missing the callbacks never fire, so a zero-event run is INCONCLUSIVE.
 //
-// The firmware routes USB ahead of BLE and is unit-tested for it (routing.rs:
-// usb_wins_without_duplicate_ble_input), but that has never been verified
-// end-to-end against a real host with both transports attached. See the
-// "Duplicate-input check (macOS)" section of firmware/README.md for how to run
-// it and how to read the result.
-//
-// This taps the HID input reports of every pico-numpad device on the host
-// (vendor 0x2e8a) via IOHIDManager, tags each report with its transport
-// (USB vs Bluetooth Low Energy), and reports whether the same key set arrived on
-// both transports within a short window.
-//
-// Reports are compared by key signature (which modifiers/keycodes are asserted)
-// rather than raw bytes, so a framing difference between the USB and BLE reports
-// -- a different report ID, a different length -- cannot mask a real duplicate.
-//
-// Requires macOS Input Monitoring permission for the process that runs this
-// (System Settings > Privacy & Security > Input Monitoring). Without it the
-// callbacks never fire, so a zero-event run reports INCONCLUSIVE rather than
-// passing.
-//
-// Usage:
-//   dupcheck [seconds]      capture from the connected device(s), default 30
-//   dupcheck --selftest     verify the duplicate-detection logic on synthetic
-//                         events (no device, no permission needed)
-//
+// Usage: `dupcheck [seconds]` (default 30) | `dupcheck --selftest`
 // Exit: 0 = no duplicates, 1 = duplicates found, 2 = nothing captured.
 
 import Foundation
@@ -79,11 +60,9 @@ enum Verdict {
 }
 
 /// The whole point of the tool, kept free of IOKit so it can be self-tested.
-///
-/// PASS requires *both* transports to have been observed. A run that only saw one
-/// transport cannot have detected a cross-transport duplicate, so it is
-/// INCONCLUSIVE rather than PASS -- otherwise a BLE link that never reported would
-/// look like a clean result.
+/// Pre: `events` is everything captured in the window.
+/// Post: PASS only when both transports were observed; one-transport traffic is
+/// INCONCLUSIVE, since it cannot have detected a cross-transport duplicate.
 func evaluate(_ events: [Event]) -> Verdict {
     let transports = Set(events.map { $0.transport })
     if events.isEmpty {
@@ -91,10 +70,8 @@ func evaluate(_ events: [Event]) -> Verdict {
     }
     if transports.count < 2 {
         let seen = transports.first!
-        // With USB connected the firmware routes every key to USB and sends zero
-        // keys to BLE (routing.rs: Destination::Usb => (keys, 0)). So BLE
-        // silence is the CORRECT behaviour, not necessarily a capture failure --
-        // but the host cannot tell that apart from a dead link on its own.
+        // BLE silence is what USB priority looks like, and the host cannot tell
+        // that apart from a dead link on its own.
         let usbHint = "this is what USB priority looks like, but it is not proof of no duplication: confirm the BLE link is up in the RTT log ('connected on host slot N'), then unplug USB and type -- reports should then appear on Bluetooth Low Energy, which proves this tool can see BLE at all"
         let bleHint = "confirm the USB link is connected and enumerated"
         let hint = seen == "USB" ? usbHint : bleHint
@@ -145,8 +122,8 @@ func report(_ events: [Event], _ verdict: Verdict) {
 
 // ---------------------------------------------------------------- selftest --
 
-/// Feed the detector synthetic events so the verdict logic is verified even where
-/// nobody can press keys. Each case asserts the verdict evaluate() produces.
+/// Feed the detector synthetic events so the verdict logic is verified without
+/// anyone pressing keys.
 func selftest() -> Int32 {
     func ev(_ t: Double, _ transport: String, _ bytes: [UInt8], _ reportID: UInt32 = 0) -> Event {
         Event(t: t, transport: transport, reportID: reportID, bytes: bytes, sig: keySignature(bytes))
@@ -182,8 +159,6 @@ func selftest() -> Int32 {
           [ev(100, "USB", keyA), ev(105, "BLE", keyB), ev(200, "USB", release), ev(205, "BLE", release)],
           expect: "pass")
 
-    // The class of false PASS this harness originally produced: a run that only saw
-    // one transport cannot have detected a cross-transport duplicate.
     check("traffic on USB only", [ev(100, "USB", keyA), ev(200, "USB", keyB)], expect: "inconclusive")
     check("traffic on BLE only", [ev(100, "BLE", keyA), ev(200, "BLE", keyB)], expect: "inconclusive")
     check("one report on one transport only", [ev(100, "USB", keyA)], expect: "inconclusive")
@@ -232,8 +207,8 @@ final class DevInfo {
 }
 
 let recorder = Recorder()
-// Context objects and report buffers are handed to IOKit as raw pointers, so they
-// must outlive the registration; keep strong references here.
+// Context objects and report buffers go to IOKit as raw pointers, so strong
+// references are kept here to outlive the registration.
 var contexts: [DevInfo] = []
 var reportBuffers: [UnsafeMutablePointer<UInt8>] = []
 var registered: Set<ObjectIdentifier> = []
@@ -260,9 +235,8 @@ let reportCallback: IOHIDReportCallback = { ctx, result, _, reportType, reportID
 }
 
 func register(_ device: IOHIDDevice) {
-    // Both the synchronous CopyDevices pass and the asynchronous matching callback
-    // can see the same device; registering it twice would double every recorded
-    // report, so key the registration on device identity.
+    // The synchronous and asynchronous passes can both see the same device; a
+    // double registration would double every recorded report.
     let id = ObjectIdentifier(device)
     guard !registered.contains(id) else { return }
     registered.insert(id)

@@ -28,6 +28,7 @@ mod debounce;
 mod hid;
 mod host_slots;
 mod keypad;
+mod passkey;
 mod recovery;
 mod routing;
 mod usb;

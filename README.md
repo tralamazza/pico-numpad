@@ -25,6 +25,10 @@ Written in Rust using [Embassy](https://embassy.dev/) and
 - Holding the `+` key for three seconds opens the slot menu. The `+` LED fills
   amber during the hold. In the menu, holding a slot key fills it amber, then red;
   releasing while amber selects the slot, releasing at red clears that bond.
+- Pairing uses passkey entry, not Just Works. The pad lights its digit keys and
+  you type the six digits the host displays; `Enter` restarts the entry and `+`
+  cancels. Entry follows the printed layout rather than your remap. See
+  [`docs/pairing.md`](docs/pairing.md).
 - The backlight turns off after 60 seconds with no input, and comes back on the
   next keypress.
 - Bluetooth advertising runs at 160 ms for the first 30 cycles after boot or a
@@ -141,11 +145,11 @@ that automation cannot cover, and measurements.
 ## Tests
 
 The hardware-free logic — debouncing, slot state, menu transitions, routing,
-config serialisation, checksums — is unit-tested on the host under `cargo test`.
-Run everything with `just check`.
+passkey entry, config serialisation, checksums — is unit-tested on the host
+under `cargo test`. Run everything with `just check`.
 
-Not covered by automated tests: pairing with real hosts, the long-press gestures,
-and battery life.
+Not covered by automated tests: pairing with real hosts (the SMP handshake
+cannot be driven from a unit test), the long-press gestures, and battery life.
 
 ## License
 

@@ -19,6 +19,7 @@ use crate::config_store::{self, HostSlots};
 use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, REPORT_MAP, build_reports};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::{Keypad, SAFETY_POLL_MS};
+use crate::passkey::{self, Entry};
 use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
@@ -167,8 +168,15 @@ pub async fn run<C: Controller>(
 ) {
     let slot = hosts.active;
     let mut resources: HostResources<DefaultPacketPool, 1, 2, 1, 1> = HostResources::new();
+    // KeyboardOnly is what buys MITM. Trouble sets the MITM bit in AuthReq for
+    // any capability except NoInputNoOutput, and every
+    // (central_capabilites, KeyboardOnly) pair in choose_pairing_method resolves
+    // to PassKeyEntry with this device inputting -- never Just Works. The one
+    // hole is a central that itself declares NoInputNoOutput, which falls back to
+    // Just Works and is not ours to prevent.
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(Address::random(host_slots::address(slot)))
+        .set_io_capabilities(IoCapabilities::KeyboardOnly)
         .build();
     if let Some(bond) = &hosts.bonds[slot as usize] {
         stack
@@ -189,6 +197,7 @@ pub async fn run<C: Controller>(
         last_brightness: 0,
         last_activity: 0,
         blanked: false,
+        passkey: Entry::new(),
     };
     info!(
         "BLE host slot {}: bonded={}",
@@ -361,6 +370,7 @@ async fn connection_task(
             Either::First(event) => match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     info!("disconnect: {:?}", reason);
+                    ui.end_passkey();
                     return None;
                 }
                 GattConnectionEvent::PairingComplete {
@@ -380,8 +390,35 @@ async fn connection_task(
                         }
                         let _ = gatt.raw().set_bondable(false);
                     }
+                    ui.end_passkey();
+                    // Only an authenticated link earns the green flash; an
+                    // unauthenticated pairing is not a success to celebrate.
+                    ui.flash(matches!(
+                        security_level,
+                        SecurityLevel::EncryptedAuthenticated
+                    ))
+                    .await;
                 }
-                GattConnectionEvent::PairingFailed(err) => warn!("pairing failed: {:?}", err),
+                GattConnectionEvent::PassKeyInput => {
+                    info!("pairing needs the code the host is showing; type it on the pad");
+                    release_reports(gatt, report, consumer_report).await;
+                    last_report = None;
+                    last_consumer = None;
+                    ui.begin_passkey(Instant::now().as_millis()).await;
+                }
+                GattConnectionEvent::PassKeyDisplay(_) | GattConnectionEvent::PassKeyConfirm(_) => {
+                    // KeyboardOnly should never select a method that asks this
+                    // device to display or confirm: it can input, but has no way
+                    // to read a code back. Cancel rather than let the attempt
+                    // hang until the peer gives up.
+                    warn!("unexpected passkey display/confirm; cancelling");
+                    let _ = gatt.pass_key_cancel();
+                }
+                GattConnectionEvent::PairingFailed(err) => {
+                    ui.end_passkey();
+                    warn!("pairing failed: {:?}", err);
+                    ui.flash(false).await;
+                }
                 GattConnectionEvent::Gatt { event } => {
                     if let Ok(reply) = event.accept() {
                         reply.send().await;
@@ -393,19 +430,26 @@ async fn connection_task(
                 let Some(input) = ui.poll(hosts, true).await else {
                     continue;
                 };
+                match ui.passkey.take_outcome() {
+                    // Never logged: the passkey is the MITM secret, and a log
+                    // line outlives the pairing it protects.
+                    passkey::Outcome::Commit(code) => {
+                        info!("passkey submitted");
+                        if let Err(e) = gatt.pass_key_input(code) {
+                            warn!("pass_key_input failed: {:?}", e);
+                        }
+                        ui.end_passkey();
+                    }
+                    passkey::Outcome::Cancel | passkey::Outcome::Timeout => {
+                        info!("passkey entry aborted");
+                        let _ = gatt.pass_key_cancel();
+                        ui.end_passkey();
+                        ui.flash(false).await;
+                    }
+                    _ => {}
+                }
                 if let Some(action) = input.action {
-                    // Released reports stop modifiers and media keys sticking on
-                    // the old host.
-                    let _ = with_timeout(
-                        Duration::from_millis(100),
-                        report.notify(gatt, &[0; REPORT_LEN], true),
-                    )
-                    .await;
-                    let _ = with_timeout(
-                        Duration::from_millis(100),
-                        consumer_report.notify(gatt, &[0; CONSUMER_REPORT_LEN], true),
-                    )
-                    .await;
+                    release_reports(gatt, report, consumer_report).await;
                     return Some(action);
                 }
                 let (value, consumer) = {
@@ -417,42 +461,68 @@ async fn connection_task(
                 // subscribe to one and not the other. The `!should_notify` arm
                 // only clears the memo, so the current state still goes out when
                 // the host subscribes later.
-                if !report.should_notify(gatt) {
-                    last_report = None;
-                } else if last_report != Some(value) {
-                    match with_timeout(
-                        Duration::from_millis(100),
-                        report.notify(gatt, &value, true),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {
-                            debug!("keys={=u16:04x} report={=[u8]:02x}", input.keys, value);
-                            last_report = Some(value);
-                        }
-                        Ok(Err(e)) => warn!("notify failed: {:?}", e),
-                        Err(_) => warn!("notify timed out"),
-                    }
+                if flush(gatt, report, &mut last_report, value).await {
+                    debug!("keys={=u16:04x}", input.keys);
                 }
-
-                if !consumer_report.should_notify(gatt) {
-                    last_consumer = None;
-                } else if last_consumer != Some(consumer) {
-                    match with_timeout(
-                        Duration::from_millis(100),
-                        consumer_report.notify(gatt, &consumer, true),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {
-                            debug!("media report={=[u8]:02x}", consumer);
-                            last_consumer = Some(consumer);
-                        }
-                        Ok(Err(e)) => warn!("media notify failed: {:?}", e),
-                        Err(_) => warn!("media notify timed out"),
-                    }
-                }
+                flush(gatt, consumer_report, &mut last_consumer, consumer).await;
             }
+        }
+    }
+}
+
+/// Zero both reports before the pad stops sending real input, so a key that was
+/// down when the pad went away from the host cannot stick there.
+async fn release_reports(
+    gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    report: &Characteristic<[u8; REPORT_LEN]>,
+    consumer_report: &Characteristic<[u8; CONSUMER_REPORT_LEN]>,
+) {
+    let _ = with_timeout(
+        Duration::from_millis(100),
+        report.notify(gatt, &[0; REPORT_LEN], true),
+    )
+    .await;
+    let _ = with_timeout(
+        Duration::from_millis(100),
+        consumer_report.notify(gatt, &[0; CONSUMER_REPORT_LEN], true),
+    )
+    .await;
+}
+
+/// Send `value` when the host is subscribed and it differs from what we last
+/// sent. Post: the memo tracks what the host actually holds, and unsubscribing
+/// clears it so a later subscribe still receives current state rather than a
+/// stale memo hit. Returns whether the report went out.
+async fn flush<const N: usize>(
+    gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    report: &Characteristic<[u8; N]>,
+    memo: &mut Option<[u8; N]>,
+    value: [u8; N],
+) -> bool {
+    if !report.should_notify(gatt) {
+        *memo = None;
+        return false;
+    }
+    if *memo == Some(value) {
+        return false;
+    }
+    match with_timeout(
+        Duration::from_millis(100),
+        report.notify(gatt, &value, true),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            *memo = Some(value);
+            true
+        }
+        Ok(Err(e)) => {
+            warn!("notify failed: {:?}", e);
+            false
+        }
+        Err(_) => {
+            warn!("notify timed out");
+            false
         }
     }
 }
@@ -466,15 +536,20 @@ struct KeypadUi {
     last_brightness: u8,
     last_activity: u64,
     blanked: bool,
+    passkey: Entry,
 }
 
 impl KeypadUi {
     /// How long the input loop may sleep before it must wake anyway.
-    /// Post: the minimum of the control state machine's next deadline, the LED
-    /// idle deadline (only while lit) and `SAFETY_POLL_MS`, and never below 1.
+    /// Post: the minimum of the control state machine's next deadline, the
+    /// passkey entry deadline, the LED idle deadline (only while lit) and
+    /// `SAFETY_POLL_MS`, and never below 1.
     fn sleep_budget(&self, now: u64) -> u64 {
         let mut budget = SAFETY_POLL_MS;
         if let Some(until) = self.controls.next_deadline(now) {
+            budget = budget.min(until);
+        }
+        if let Some(until) = self.passkey.deadline_in(now) {
             budget = budget.min(until);
         }
         if let Some(settle) = self.keypad.next_settle(now) {
@@ -508,10 +583,18 @@ impl KeypadUi {
     async fn poll(&mut self, hosts: &HostSlots, connected: bool) -> Option<Input> {
         let pressed = self.keypad.read_pressed().await.ok()?;
         let now = Instant::now().as_millis();
-        let mut input = self.controls.update(now, pressed);
         if pressed != 0 {
             self.last_activity = now;
         }
+        // Passkey entry owns the pad outright: the digits are read by position
+        // off the factory layout rather than through the user keymap, and no HID
+        // report goes out while it is active. It also bypasses Controls, which is
+        // what keeps `+` from opening the slot menu mid-entry.
+        if self.passkey.is_active() {
+            self.passkey.update(now, pressed);
+            return Some(self.render_passkey(hosts).await);
+        }
+        let mut input = self.controls.update(now, pressed);
         let usb_active = crate::usb::keyboard_active();
         let (usb_keys, ble_keys) = self.router.update(input.keys, usb_active, connected);
         let (usb_kbd, usb_consumer) = {
@@ -578,5 +661,61 @@ impl KeypadUi {
             }
         }
         Some(input)
+    }
+
+    /// The digit keys stay marked so the user can see which keys are live, the
+    /// rest go dark, and the fill rises with the digits entered. The backlight is
+    /// floored because marks the user cannot see are not a prompt.
+    async fn render_passkey(&mut self, hosts: &HostSlots) -> Input {
+        let (brightness, color) = {
+            let cfg = CONFIG.lock().await;
+            (
+                cfg.brightness.max(24),
+                cfg.slot_colors[hosts.active as usize],
+            )
+        };
+        let leds = self.passkey.frame(color);
+        self.blanked = false;
+        if self.last_leds != Some(leds) || self.last_brightness != brightness {
+            self.backlight.set_brightness(brightness);
+            if self.backlight.write(&leds).await.is_ok() {
+                self.last_leds = Some(leds);
+                self.last_brightness = brightness;
+            }
+        }
+        Input {
+            keys: 0,
+            menu: Menu::Closed,
+            action: None,
+        }
+    }
+
+    /// Start collecting. `read_pressed` seeds the entry with whatever is already
+    /// down so a key resting on the pad cannot be read as the first digit.
+    async fn begin_passkey(&mut self, now: u64) {
+        let held = self.keypad.read_pressed().await.unwrap_or(0);
+        self.passkey.begin(now, held);
+    }
+
+    /// Leave passkey mode. Controls restarts in its drain state and the router
+    /// is rearmed to nothing, because the entry bypassed both -- otherwise a key
+    /// resting on the pad at that moment would arrive at the host as a fresh
+    /// press instead of being released first.
+    fn end_passkey(&mut self) {
+        self.passkey.end();
+        self.controls = Controls::new();
+        self.router = crate::routing::Router::default();
+    }
+
+    /// Confirm or deny the attempt in the one place the user is still looking.
+    async fn flash(&mut self, ok: bool) {
+        let color = if ok { [0, 120, 0] } else { [140, 0, 0] };
+        for _ in 0..3 {
+            let _ = self.backlight.write(&[color; NUM_LEDS]).await;
+            Timer::after_millis(200).await;
+            let _ = self.backlight.write(&[[0, 0, 0]; NUM_LEDS]).await;
+            Timer::after_millis(150).await;
+        }
+        self.last_leds = None;
     }
 }

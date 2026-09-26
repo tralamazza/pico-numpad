@@ -192,6 +192,27 @@ fn ramp(from: u8, to: u8, progress: u8) -> u8 {
     u8::try_from(a + ((b - a) * p / 100)).unwrap_or(from)
 }
 
+/// Idle tint level: the configured slot colour scaled to this brightness.
+/// Chosen so the field reads as tinted without competing with a pressed key.
+pub const IDLE_LEVEL: u8 = 12;
+
+/// Menu brightness levels. Bond status is carried by brightness now that hue
+/// is spent on slot identity, so bonded and empty must stay far apart.
+const MENU_BONDED_LEVEL: u8 = 100;
+const MENU_EMPTY_LEVEL: u8 = 28;
+/// The active slot pulses by dropping to a quarter of its own level.
+const MENU_PULSE_DIVISOR: u16 = 4;
+
+/// Scale an RGB colour by a 0..=255 level, channel-wise.
+#[must_use]
+pub const fn scale(c: [u8; 3], level: u8) -> [u8; 3] {
+    [
+        (c[0] as u16 * level as u16 / 255) as u8,
+        (c[1] as u16 * level as u16 / 255) as u8,
+        (c[2] as u16 * level as u16 / 255) as u8,
+    ]
+}
+
 /// Color of the `+` key while its hold is still building. The key the user is
 /// actually pressing ramps up in amber -- the same "a control is being held"
 /// family the slot keys use -- from dim to bright over the three seconds, which
@@ -201,19 +222,25 @@ pub fn enter_fill(progress: u8) -> [u8; 3] {
     [ramp(90, 255, progress), ramp(40, 130, progress), 0]
 }
 
-/// Bonded slots are green, empty slots blue. The active slot pulses without
-/// changing its status color.
+/// Menu colours follow each slot's own identity colour, so the hue you picked
+/// for slot 2 is the hue you see while choosing between slots -- not green and
+/// blue, which said nothing about which slot was which.
 ///
-/// A held slot ramps amber to red as the clear approaches: release while it is
-/// still amber and you have only selected the slot, hold it to full red and the
-/// bond is wiped. The color shift is the "this is about to become destructive"
-/// cue that a static amber cannot give.
+/// Bond status moves to brightness: bonded is bright, empty is dim. The
+/// active slot pulses by dropping to a quarter of its own level, which stays
+/// distinguishable from an empty slot because it pulses from a higher base.
+///
+/// A held slot still ramps amber to red regardless of its identity colour.
+/// That cue is about to destroy a bond and must not be recoloured by a
+/// preference -- if slot 3 is yellow, a yellow key must not also mean
+/// "release now or you lose this host".
 #[must_use]
 pub fn menu_colors(
     bonded: [bool; SLOT_COUNT],
     active: u8,
     menu: Menu,
     now: u64,
+    colors: [[u8; 3]; SLOT_COUNT],
 ) -> [[u8; 3]; SLOT_COUNT] {
     core::array::from_fn(|i| {
         if let Menu::Holding { slot, progress } = menu
@@ -221,16 +248,17 @@ pub fn menu_colors(
         {
             return [ramp(70, 150, progress), ramp(55, 0, progress), 0];
         }
-        let level = if i == active as usize && (now / 400).is_multiple_of(2) {
-            25
+        let own = if bonded[i] {
+            MENU_BONDED_LEVEL
         } else {
-            100
+            MENU_EMPTY_LEVEL
         };
-        if bonded[i] {
-            [0, level, 0]
+        let level = if i == active as usize && (now / 400).is_multiple_of(2) {
+            (u16::from(own) / MENU_PULSE_DIVISOR) as u8
         } else {
-            [0, 0, level]
-        }
+            own
+        };
+        scale(colors[i], level)
     })
 }
 
@@ -537,28 +565,101 @@ mod tests {
         }
     }
 
+    /// The tint and the menu both scale one configured colour, so `scale` has
+    /// to be exact at the ends and proportional in between.
     #[test]
-    fn menu_colors_distinguish_bonds_and_hold_without_losing_active_status() {
-        assert_eq!(
-            menu_colors([true, false, true], 0, Menu::Open, 400),
-            [[0, 100, 0], [0, 0, 100], [0, 100, 0]]
+    fn scale_is_exact_at_the_ends_and_proportional_between() {
+        let c = [255u8, 128, 64];
+        assert_eq!(scale(c, 0), [0, 0, 0]);
+        assert_eq!(scale(c, 255), c, "full level must be the colour unchanged");
+        assert_eq!(scale(c, 128), [128, 64, 32]);
+        assert_eq!(scale([0, 0, 0], 255), [0, 0, 0], "black stays black");
+    }
+
+    /// Slot identity has to survive into the menu: the hue you configured for a
+    /// slot is the hue you see while choosing slots.
+    #[test]
+    fn menu_keeps_each_slots_own_hue_and_uses_brightness_for_bond_state() {
+        let colors = [[255, 0, 216], [0, 216, 255], [255, 216, 0]];
+        // slot 9 is never active, so nothing pulses and levels are steady
+        let c = menu_colors([true, false, true], 9, Menu::Open, 0, colors);
+        let empty: [[u8; 3]; SLOT_COUNT] =
+            core::array::from_fn(|i| scale(colors[i], MENU_EMPTY_LEVEL));
+        assert_eq!(c[0], scale(colors[0], MENU_BONDED_LEVEL));
+        assert_eq!(c[1], scale(colors[1], MENU_EMPTY_LEVEL));
+        assert_eq!(c[2], scale(colors[2], MENU_BONDED_LEVEL));
+
+        // Bond status is carried by brightness now that hue is spent on slot
+        // identity, so a bonded slot has to render clearly brighter than an
+        // empty one -- asserted on what actually reaches the LEDs, not on the
+        // level constants, which would pass no matter how they were set.
+        for (i, is_bonded) in [true, false, true].iter().enumerate() {
+            if !is_bonded {
+                continue;
+            }
+            for ch in 0..3 {
+                assert!(
+                    c[i][ch] >= 3 * empty[i][ch] || c[i][ch] == 0,
+                    "slot {i} channel {ch}: bonded {} is not clearly above empty {}",
+                    c[i][ch],
+                    empty[i][ch]
+                );
+            }
+        }
+    }
+
+    /// The active slot pulses from its own base, so an active-but-empty slot
+    /// pulses down rather than up into bonded territory.
+    #[test]
+    fn the_active_slot_pulses_downward_from_its_own_level() {
+        let colors = [[255, 0, 216], [0, 216, 255], [255, 216, 0]];
+        let (steady, pulsed) = (
+            menu_colors([true, false, true], 0, Menu::Open, 400, colors)[0],
+            menu_colors([true, false, true], 0, Menu::Open, 800, colors)[0],
         );
-        assert_eq!(
-            menu_colors([true, false, true], 0, Menu::Open, 800)[0],
-            [0, 25, 0]
+        assert_eq!(steady, scale(colors[0], MENU_BONDED_LEVEL));
+        assert!(
+            pulsed[0] < steady[0] && pulsed[2] < steady[2],
+            "active pulse {pulsed:?} did not drop below {steady:?}"
         );
-        assert_eq!(
-            menu_colors(
-                [true, false, true],
-                0,
-                Menu::Holding {
-                    slot: 1,
-                    progress: 0
-                },
-                400
-            )[1],
-            [70, 55, 0]
+        let (es, ep) = (
+            menu_colors([true, false, true], 1, Menu::Open, 400, colors)[1],
+            menu_colors([true, false, true], 1, Menu::Open, 800, colors)[1],
         );
+        assert_eq!(es, scale(colors[1], MENU_EMPTY_LEVEL));
+        assert!(
+            ep[1] < es[1] && ep[2] < es[2],
+            "active empty pulse must drop too, not rise into bonded"
+        );
+    }
+
+    /// A destructive hold must not inherit the slot's colour. If slot 3 is
+    /// yellow, yellow must still never mean "about to wipe this host".
+    #[test]
+    fn a_destructive_hold_ignores_the_slot_colour_entirely() {
+        let colors = [[255, 216, 0], [255, 216, 0], [255, 216, 0]];
+        let held = menu_colors(
+            [true, true, true],
+            0,
+            Menu::Holding {
+                slot: 2,
+                progress: 0,
+            },
+            0,
+            colors,
+        )[2];
+        assert_eq!(held, [70, 55, 0], "hold must start amber, not yellow");
+        let full = menu_colors(
+            [true, true, true],
+            0,
+            Menu::Holding {
+                slot: 2,
+                progress: 100,
+            },
+            0,
+            colors,
+        )[2];
+        assert_eq!(full, [150, 0, 0], "hold must end red");
     }
 
     #[test]
@@ -637,6 +738,7 @@ mod tests {
 
     #[test]
     fn held_slot_shifts_amber_to_red_as_the_clear_approaches() {
+        let colors = [[255u8, 0, 216], [0, 216, 255], [255, 216, 0]];
         let at = |p: u8| {
             menu_colors(
                 [false, false, false],
@@ -646,6 +748,7 @@ mod tests {
                     progress: p,
                 },
                 0,
+                colors,
             )[1]
         };
         let start = at(0);
@@ -664,7 +767,7 @@ mod tests {
             assert!(cur[1] <= prev[1], "green must not rise at {p}: {cur:?}");
             prev = cur;
         }
-        // A non-held slot keeps its own status color while another is held.
+        // A non-held slot keeps its own status colour while another is held.
         assert_eq!(
             menu_colors(
                 [false, false, true],
@@ -673,9 +776,10 @@ mod tests {
                     slot: 1,
                     progress: 100
                 },
-                100
+                100,
+                colors
             )[2],
-            [0, 100, 0]
+            scale(colors[2], MENU_BONDED_LEVEL)
         );
     }
 

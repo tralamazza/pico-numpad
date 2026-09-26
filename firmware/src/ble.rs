@@ -584,9 +584,9 @@ impl KeypadUi {
         crate::usb::publish_reports(usb_kbd, usb_consumer).await;
         input.keys = ble_keys;
         let connected = connected || usb_active;
-        let (mode, mut brightness) = {
+        let (mode, mut brightness, slot_colors) = {
             let cfg = CONFIG.lock().await;
-            (cfg.led_mode, cfg.brightness)
+            (cfg.led_mode, cfg.brightness, cfg.slot_colors)
         };
         let mut leds = [[0; 3]; NUM_LEDS];
         let blank = host_slots::backlight_blank(now, self.last_activity, input.menu);
@@ -602,6 +602,7 @@ impl KeypadUi {
                 hosts.active,
                 input.menu,
                 now,
+                slot_colors,
             );
             // LED index == physical key bit index: the 16 keys sit on the TCA9555's
             // 16 GPIOs and the APA102 chain is wired in the same order, so a key's
@@ -617,24 +618,31 @@ impl KeypadUi {
                 leds[host_slots::PLUS.trailing_zeros() as usize] = host_slots::enter_fill(progress);
             }
         } else if mode != led_mode::OFF && !blank {
+            let tint =
+                host_slots::scale(slot_colors[hosts.active as usize], host_slots::IDLE_LEVEL);
             for (i, led) in leds.iter_mut().enumerate() {
                 *led = if connected {
                     if pressed & (1 << i) != 0 {
                         [0, 255, 0]
                     } else {
-                        [4, 4, 4]
+                        tint
                     }
                 } else {
                     [0, 0, 40]
                 };
             }
             if !connected {
+                // Same identity colour, brightness still carrying bond state, so
+                // "which slot am I" reads the same whether linked or not.
                 leds[SLOT_KEYS[hosts.active as usize].trailing_zeros() as usize] =
-                    if hosts.bonds[hosts.active as usize].is_some() {
-                        [0, 80, 0]
-                    } else {
-                        [0, 0, 150]
-                    };
+                    host_slots::scale(
+                        slot_colors[hosts.active as usize],
+                        if hosts.bonds[hosts.active as usize].is_some() {
+                            80
+                        } else {
+                            40
+                        },
+                    );
             }
         }
         if self.last_leds != Some(leds) || self.last_brightness != brightness {

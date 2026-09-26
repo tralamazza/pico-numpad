@@ -12,15 +12,31 @@ pub const CONFIG_LEN: usize = 32;
 
 const MAGIC: u8 = 0xC0;
 /// Record version written by this firmware.
-const VERSION: u8 = 2;
-/// v1 is still accepted on read. It has no consumer-key mask; see `from_bytes`.
+const VERSION: u8 = 3;
+/// Oldest version still accepted on read.
 const VERSION_LEGACY: u8 = 1;
+/// Version that introduced `consumer_mask`. Older records must not have these
+/// bytes read: they were reserved and could hold anything a future version put
+/// there.
+const VERSION_CONSUMER: u8 = 2;
 
 // Field offsets in the fixed 32-byte record.
 const KEYMAP_OFF: usize = 2;
 const BRIGHTNESS_OFF: usize = 18;
 const LED_MODE_OFF: usize = 19;
 const CONSUMER_MASK_OFF: usize = 20;
+/// Three host slots x RGB, and the last of the reserved space. There are no
+/// spare bytes left after this; a future field means growing the record.
+const SLOT_COLORS_OFF: usize = 22;
+
+/// Per-slot identity colours, full range. The renderer scales these down per
+/// context rather than storing a colour per context, so one value per slot
+/// drives both the idle tint and the menu.
+pub const DEFAULT_SLOT_COLORS: [[u8; 3]; 3] = [
+    [255, 0, 216], // magenta
+    [0, 216, 255], // cyan
+    [255, 216, 0], // yellow
+];
 
 /// LED behaviour.
 pub mod led_mode {
@@ -57,6 +73,12 @@ pub struct Config {
     pub brightness: u8,
     /// LED behaviour, see [`led_mode`].
     pub led_mode: u8,
+    /// Identity colour per host slot, index 0..2.
+    ///
+    /// Stored at full range and scaled by the renderer for each context, so a
+    /// user picking "cyan" gets cyan whether it is the dim idle tint or the
+    /// brighter menu highlight.
+    pub slot_colors: [[u8; 3]; 3],
 }
 
 impl Config {
@@ -67,6 +89,7 @@ impl Config {
             consumer_mask: 0,
             brightness: 8,
             led_mode: led_mode::HIGHLIGHT,
+            slot_colors: DEFAULT_SLOT_COLORS,
         }
     }
 
@@ -87,18 +110,23 @@ impl Config {
         b[LED_MODE_OFF] = self.led_mode;
         b[CONSUMER_MASK_OFF..CONSUMER_MASK_OFF + 2]
             .copy_from_slice(&self.consumer_mask.to_le_bytes());
+        for (i, c) in self.slot_colors.iter().enumerate() {
+            b[SLOT_COLORS_OFF + i * 3..SLOT_COLORS_OFF + i * 3 + 3].copy_from_slice(c);
+        }
         b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
         b
     }
 
     /// Deserialise, returning `None` if magic/version/checksum do not match.
     ///
-    /// v1 records are accepted as well as v2. v1 has no consumer mask, so those
-    /// keys read as "none" and a v1 config keeps working unchanged; it is
-    /// rewritten as v2 the next time it is saved.
+    /// Records older than this firmware are accepted field by field: a field is
+    /// only read if the record's version actually has it, otherwise the default
+    /// applies. Bytes that were *reserved* in an older record must not be
+    /// interpreted, because they could hold whatever some other version put
+    /// there.
     #[must_use]
     pub fn from_bytes(b: &[u8; CONFIG_LEN]) -> Option<Config> {
-        if b[0] != MAGIC || (b[1] != VERSION && b[1] != VERSION_LEGACY) {
+        if b[0] != MAGIC || b[1] < VERSION_LEGACY || b[1] > VERSION {
             return None;
         }
         if b[CONFIG_LEN - 1] != checksum(&b[..CONFIG_LEN - 1]) {
@@ -106,18 +134,28 @@ impl Config {
         }
         let mut keymap = [0u8; 16];
         keymap.copy_from_slice(&b[KEYMAP_OFF..KEYMAP_OFF + 16]);
-        // Only read the mask from a v2 record. In a v1 record these two bytes
-        // are reserved and could hold anything a future version put there.
-        let consumer_mask = if b[1] >= VERSION {
+        let consumer_mask = if b[1] >= VERSION_CONSUMER {
             u16::from_le_bytes([b[CONSUMER_MASK_OFF], b[CONSUMER_MASK_OFF + 1]])
         } else {
             0
+        };
+        let slot_colors = if b[1] >= VERSION {
+            core::array::from_fn(|i| {
+                [
+                    b[SLOT_COLORS_OFF + i * 3],
+                    b[SLOT_COLORS_OFF + i * 3 + 1],
+                    b[SLOT_COLORS_OFF + i * 3 + 2],
+                ]
+            })
+        } else {
+            DEFAULT_SLOT_COLORS
         };
         Some(Config {
             keymap,
             consumer_mask,
             brightness: b[BRIGHTNESS_OFF],
             led_mode: b[LED_MODE_OFF],
+            slot_colors,
         })
     }
 }
@@ -138,7 +176,7 @@ mod tests {
     /// offsets or the checksum, this test fails and `web/app.js` needs updating
     /// to match.
     const WEB_FACTORY: [u8; CONFIG_LEN] = [
-        0xc0, 0x02, // magic, version 2
+        0xc0, 0x03, // magic, version 3
         0x5f, 0x60, 0x61, 0x54, // 7 8 9 /
         0x5c, 0x5d, 0x5e, 0x55, // 4 5 6 *
         0x59, 0x5a, 0x5b, 0x56, // 1 2 3 -
@@ -146,8 +184,10 @@ mod tests {
         0x08, // brightness
         0x01, // led_mode = HIGHLIGHT
         0x00, 0x00, // consumer_mask = no consumer keys
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // reserved
-        0x83, // checksum
+        0xff, 0x00, 0xd8, // slot 1 magenta
+        0x00, 0xd8, 0xff, // slot 2 cyan
+        0xff, 0xd8, 0x00, // slot 3 yellow
+        0x09, // checksum
     ];
 
     /// A v1 record: identical layout, but version byte 1 and no consumer mask.
@@ -167,6 +207,50 @@ mod tests {
     fn web_editor_bytes_parse_back_to_the_defaults() {
         assert_eq!(Config::from_bytes(&WEB_FACTORY), Some(Config::default()));
     }
+
+    /// A v2 record has no colours. Its reserved bytes must not be read as one --
+    /// a device that never had the feature gets the defaults, not black slots.
+    #[test]
+    fn a_v2_record_gets_default_colours_not_its_reserved_bytes() {
+        let mut b = Config::default().to_bytes();
+        b[1] = 2;
+        // Reserved-as-colours bytes left zeroed, as a real v2 record has them.
+        for slot in 0..3 {
+            for c in 0..3 {
+                b[SLOT_COLORS_OFF + slot * 3 + c] = 0;
+            }
+        }
+        b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
+        let cfg = Config::from_bytes(&b).expect("v2 must still parse");
+        assert_eq!(cfg.slot_colors, DEFAULT_SLOT_COLORS);
+        // and everything v2 did have survives
+        assert_eq!(cfg.keymap, DEFAULT_KEYMAP);
+        assert_eq!(cfg.brightness, 8);
+    }
+
+    /// The same bytes read as colours on v3 must NOT be read as a mask on v1.
+    #[test]
+    fn a_v1_record_ignores_the_bytes_that_are_colours_in_v3() {
+        let mut b = Config::default().to_bytes();
+        b[1] = 1;
+        b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
+        let cfg = Config::from_bytes(&b).expect("v1 must still parse");
+        assert_eq!(cfg.consumer_mask, 0);
+        assert_eq!(cfg.slot_colors, DEFAULT_SLOT_COLORS);
+    }
+
+    #[test]
+    fn slot_colors_round_trip() {
+        let mut cfg = Config::default();
+        cfg.slot_colors = [[1, 2, 3], [250, 200, 4], [9, 255, 130]];
+        assert_eq!(Config::from_bytes(&cfg.to_bytes()), Some(cfg));
+    }
+
+    /// Colours live in the last of the reserved space; if that ever overlaps a
+    /// real field the record corrupts itself silently. Checked at compile time,
+    /// since it cannot change at runtime anyway.
+    const _: () = assert!(SLOT_COLORS_OFF + 9 == CONFIG_LEN - 1);
+    const _: () = assert!(SLOT_COLORS_OFF > CONSUMER_MASK_OFF + 1);
 
     /// A device flashed before consumer keys existed must keep working: the v1
     /// record reads back as the same config with no consumer keys set, and is
@@ -205,13 +289,28 @@ mod tests {
         assert!(back.is_consumer(15));
     }
 
+    /// Derived from the version constants rather than a hardcoded number, so
+    /// bumping `VERSION` cannot silently turn this test into one that asserts
+    /// the current version is rejected. That has already happened once here.
     #[test]
-    fn rejects_an_unknown_version() {
-        let mut b = Config::default().to_bytes();
-        b[1] = 3;
-        b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
-        assert_eq!(Config::from_bytes(&b), None);
+    fn accepts_every_supported_version_and_rejects_the_rest() {
+        let base = Config::default().to_bytes();
+        for v in 0u8..=255 {
+            let mut b = base;
+            b[1] = v;
+            b[CONFIG_LEN - 1] = checksum(&b[..CONFIG_LEN - 1]);
+            let accepted = (VERSION_LEGACY..=VERSION).contains(&v);
+            assert_eq!(
+                Config::from_bytes(&b).is_some(),
+                accepted,
+                "version {v} should {}be accepted",
+                if accepted { "" } else { "not " }
+            );
+        }
     }
+
+    /// Guard the accepted range against a silly edit making it vacuous.
+    const _: () = assert!(VERSION > VERSION_LEGACY);
 
     #[test]
     fn round_trips_a_non_default_config() {
@@ -220,6 +319,7 @@ mod tests {
             consumer_mask: 0,
             brightness: 31,
             led_mode: led_mode::OFF,
+            slot_colors: [[3, 0, 250], [0, 250, 3], [250, 3, 0]],
         };
         assert_eq!(Config::from_bytes(&c.to_bytes()), Some(c));
     }

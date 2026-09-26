@@ -203,7 +203,9 @@ pub fn build_reports(
     (kbd, consumer_bits.to_le_bytes())
 }
 
-/// Keyboard-only build, for callers with no consumer keys.
+/// Keyboard-only shorthand for the tests below; the device always calls
+/// `build_reports` with a real consumer mask.
+#[cfg(test)]
 #[must_use]
 pub fn build_report(pressed: u16, keymap: &[u8; 16]) -> [u8; REPORT_LEN] {
     build_reports(pressed, keymap, 0).0

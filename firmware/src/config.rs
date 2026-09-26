@@ -78,12 +78,6 @@ impl Config {
         }
     }
 
-    /// Whether physical key `bit` is a consumer (media) key.
-    #[must_use]
-    pub const fn is_consumer(&self, bit: usize) -> bool {
-        self.consumer_mask & (1u16 << bit) != 0
-    }
-
     /// Serialise to a fixed record with a trailing checksum.
     #[must_use]
     pub fn to_bytes(self) -> [u8; CONFIG_LEN] {
@@ -246,10 +240,15 @@ mod tests {
         c.keymap[15] = 0xcd; // Play/Pause
         let back = Config::from_bytes(&c.to_bytes()).unwrap();
         assert_eq!(back, c);
-        assert!(back.is_consumer(0));
-        assert!(back.is_consumer(2));
-        assert!(!back.is_consumer(1));
-        assert!(back.is_consumer(15));
+        assert_eq!(back.consumer_mask, 0b1000_0000_0000_0101);
+        for bit in [0, 2, 15] {
+            assert_ne!(back.consumer_mask & (1 << bit), 0, "key {bit} is consumer");
+        }
+        assert_eq!(
+            back.consumer_mask & (1 << 1),
+            0,
+            "key 1 is not a consumer key"
+        );
     }
 
     /// Derived from the version constants so bumping `VERSION` cannot silently

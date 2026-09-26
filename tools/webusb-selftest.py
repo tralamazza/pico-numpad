@@ -50,6 +50,10 @@ HARNESS = """
    navigator.usb. Keep it faithful or it will mask bugs. */
 window.__calls = [];
 window.__fail = [];
+/* Command byte the stub should NAK, or null to ACK everything. Lets the tests
+   drive the editor's device-error paths, which an always-ACKing stub never
+   reaches. */
+window.__reject = null;
 
 const FACTORY = [0xc0, 0x01,
   0x5f, 0x60, 0x61, 0x54, 0x5c, 0x5d, 0x5e, 0x55,
@@ -67,7 +71,8 @@ class FakeUSBDevice {
   async transferOut(ep, bytes) {
     const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     window.__calls.push("out:0x" + b[0].toString(16));
-    if (b[0] === 0x01) this._pending = new Uint8Array([0x00, ...FACTORY]);
+    if (window.__reject === b[0]) this._pending = new Uint8Array([0x01, b[0]]);
+    else if (b[0] === 0x01) this._pending = new Uint8Array([0x00, ...FACTORY]);
     else this._pending = new Uint8Array([0x00, b[0]]);
   }
   async transferIn(ep, len) {
@@ -170,6 +175,33 @@ window.addEventListener("load", async () => {
             draft[22] === 0x00 && draft[23] === 0xff && draft[24] === 0x00 &&
             draft[25] === 0x00 && draft[26] === 216 && draft[27] === 255]);
   }
+
+  // --- the device rejects a write ---
+  // A stub that always ACKs never reaches app.js's `resp[0] !== OK` branches.
+  // The bad case is a save that silently looked successful: the editor must
+  // surface the rejection and keep the draft marked unsaved.
+  const badge = document.getElementById("dirtyBadge");
+  const toasts = () =>
+    [...document.querySelectorAll("#toasts .toast")].map((t) => t.textContent).join(" | ");
+  const br = document.getElementById("brightness");
+  br.value = "17";
+  br.dispatchEvent(new Event("input", { bubbles: true }));
+  await wait(60);
+  r.push(["a settings change marks the draft unsaved", badge.classList.contains("show")]);
+
+  window.__reject = 0x03; // CMD_SAVE
+  document.getElementById("save").click();
+  await wait(400);
+  r.push(["rejected SAVE surfaces an error toast", /SAVE failed/i.test(toasts())]);
+  r.push(["rejected SAVE leaves the draft unsaved", badge.classList.contains("show")]);
+
+  window.__reject = null;
+  document.getElementById("save").click();
+  await wait(400);
+  r.push([
+    "acked SAVE clears the unsaved badge",
+    !badge.classList.contains("show") && /Saved to flash/i.test(toasts()),
+  ]);
 
   // A disconnect fired by navigator.usb must be reflected in the chip and not
   // be immediately clobbered back to "Not connected" by setControls().

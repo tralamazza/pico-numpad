@@ -153,6 +153,24 @@ window.addEventListener("load", async () => {
   r.push(["keyboard reassign clears the media tag and mask bit",
           !k0b.querySelector(".tag") && draft[2] === 0x5f && (draft[20] & 0x01) === 0]);
 
+  // --- slot colours ---
+  // The stub returns a v1 record, which has no colours. The editor must fill in
+  // the defaults rather than read the reserved bytes, matching the firmware.
+  const DEF_COLORS = [255, 0, 216, 0, 216, 255, 255, 216, 0];
+  r.push(["v1 record migrates to default slot colours, not its reserved bytes",
+          JSON.stringify([...draft.slice(22, 31)]) === JSON.stringify(DEF_COLORS)]);
+  const c0 = document.getElementById("slotColor0");
+  r.push(["colour picker exists and reflects the draft",
+          !!c0 && c0.value === "#ff00d8"]);
+  if (c0) {
+    c0.value = "#00ff00";
+    c0.dispatchEvent(new Event("input", { bubbles: true }));
+    await wait(60);
+    r.push(["colour picker writes to its own three bytes only",
+            draft[22] === 0x00 && draft[23] === 0xff && draft[24] === 0x00 &&
+            draft[25] === 0x00 && draft[26] === 216 && draft[27] === 255]);
+  }
+
   // A disconnect fired by navigator.usb must be reflected in the chip and not
   // be immediately clobbered back to "Not connected" by setControls().
   const ev = new Event("disconnect");
@@ -221,8 +239,43 @@ def check_media_key_lists_agree() -> None:
     print(f"  PASS  firmware and editor offer the same {len(set(fw))} media keys")
 
 
+def check_slot_color_defaults_agree() -> None:
+    """The editor seeds its own factory defaults and substitutes them when
+    migrating an older record. If those differ from the firmware's, a device
+    reset by firmware and one reset by the editor end up a different colour and
+    nothing catches it."""
+    hid = (ROOT / "firmware" / "src" / "config.rs").read_text()
+    m = re.search(
+        r"pub const DEFAULT_SLOT_COLORS: \[\[u8; 3\]; 3\] = \[(.*?)\n\];", hid, re.S
+    )
+    if not m:
+        sys.exit("could not find DEFAULT_SLOT_COLORS in firmware/src/config.rs")
+    fw = [
+        [int(x) for x in re.findall(r"\b(\d{1,3})\b", line)]
+        for line in m.group(1).strip().splitlines()
+        if "[" in line
+    ]
+
+    app = (ROOT / "web" / "app.js").read_text()
+    m2 = re.search(r"const DEFAULT_SLOT_COLORS = \[(.*?)\n\];", app, re.S)
+    if not m2:
+        sys.exit("could not find DEFAULT_SLOT_COLORS in web/app.js")
+    web = [
+        [int(x) for x in re.findall(r"\b(\d{1,3})\b", line)]
+        for line in m2.group(1).strip().splitlines()
+        if "[" in line
+    ]
+
+    if len(fw) != 3 or any(len(c) != 3 for c in fw):
+        sys.exit(f"firmware DEFAULT_SLOT_COLORS malformed: {fw}")
+    if fw != web:
+        sys.exit(f"slot colour defaults differ: firmware={fw} editor={web}")
+    print("  PASS  firmware and editor share the same slot colour defaults")
+
+
 def main() -> int:
     check_media_key_lists_agree()
+    check_slot_color_defaults_agree()
     browser = find_browser()
 
     with tempfile.TemporaryDirectory() as tmp:

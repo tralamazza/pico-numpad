@@ -241,6 +241,27 @@
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       @media (max-width: 460px) { .row { grid-template-columns: 1fr; } }
 
+      .slotcolors { display: flex; gap: 14px; flex-wrap: wrap; }
+      .slotcolor {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .slotcolor input[type="color"] {
+        width: 34px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 6px;
+        background: none;
+        cursor: pointer;
+      }
+      .slotcolor input[type="color"]:disabled { opacity: 0.4; cursor: not-allowed; }
+      .hint { color: var(--muted); opacity: 0.7; font-weight: 400; }
+
       /* ---- toast ---- */
       #toasts {
         position: fixed; right: 16px; bottom: 16px; z-index: 50;
@@ -334,6 +355,14 @@
                   <option value="0">Off</option>
                   <option value="1" selected>Highlight pressed keys</option>
                 </select>
+              </div>
+            </div>
+            <div class="field">
+              <label><span>Slot colours</span><span class="hint">shown on idle keys and in the slot menu</span></label>
+              <div class="slotcolors">
+                <label class="slotcolor"><input id="slotColor0" type="color" value="#ff00d8" disabled /> Slot 1</label>
+                <label class="slotcolor"><input id="slotColor1" type="color" value="#00d8ff" disabled /> Slot 2</label>
+                <label class="slotcolor"><input id="slotColor2" type="color" value="#ffd800" disabled /> Slot 3</label>
               </div>
             </div>
             <div class="field">

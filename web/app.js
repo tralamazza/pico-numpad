@@ -4,7 +4,8 @@
  * Wire protocol. Mirrors firmware/src/usb.rs and firmware/src/config.rs.
  * The config is a fixed 32-byte little-endian record:
  *   [0]=magic 0xC0  [1]=version  [2..18]=keymap  [18]=brightness
- *   [19]=led_mode  [20..22]=consumer_mask  [22..31]=reserved  [31]=checksum
+ *   [19]=led_mode  [20..22]=consumer_mask  [22..31]=slot colours (3xRGB)
+ *   [31]=checksum
  * Bytes we do not manage are carried through untouched on write, so a newer
  * firmware's reserved fields survive an edit from an older editor.
  * ------------------------------------------------------------------ */
@@ -21,9 +22,21 @@ const KEYMAP_OFF = 2;
 const BRIGHTNESS_OFF = 18;
 const LEDMODE_OFF = 19;
 const CONSUMER_MASK_OFF = 20;
+const SLOT_COLORS_OFF = 22; // 3 slots x RGB, the last of the reserved space
 const CHECKSUM_OFF = 31;
-const VERSION = 2;
-// v1 records have no consumer mask; they read back with no media keys.
+const VERSION = 3;
+const VERSION_CONSUMER = 2;
+// v1 records have no consumer mask; v1 and v2 have no slot colours. Both read
+// back as the defaults below, matching the firmware rather than the raw bytes,
+// which in an older record are reserved and mean nothing.
+
+// Must match DEFAULT_SLOT_COLORS in firmware/src/config.rs. The selftest parses
+// both and fails if they drift.
+const DEFAULT_SLOT_COLORS = [
+  [255, 0, 216], // magenta
+  [0, 216, 255], // cyan
+  [255, 216, 0], // yellow
+];
 
 const CMD_GET = 0x01;
 const CMD_SET = 0x02;
@@ -166,6 +179,9 @@ function factoryBytes() {
   b[LEDMODE_OFF] = 1; // HIGHLIGHT
   b[CONSUMER_MASK_OFF] = 0;
   b[CONSUMER_MASK_OFF + 1] = 0;
+  DEFAULT_SLOT_COLORS.forEach((c, i) =>
+    b.set(c, SLOT_COLORS_OFF + i * 3),
+  );
   b[CHECKSUM_OFF] = checksum(b);
   return b;
 }
@@ -400,6 +416,20 @@ function renderSettings() {
     sel.appendChild(opt);
   }
   sel.value = String(led);
+
+  for (let i = 0; i < 3; i++) {
+    $("slotColor" + i).value = rgbToHex(draft, SLOT_COLORS_OFF + i * 3);
+  }
+}
+
+function rgbToHex(bytes, off) {
+  const h = (n) => (bytes[off + n] & 0xff).toString(16).padStart(2, "0");
+  return `#${h(0)}${h(1)}${h(2)}`;
+}
+
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return Number.isNaN(v) ? [0, 0, 0] : [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
 }
 
 function renderAll() {
@@ -480,9 +510,14 @@ function loadDraftFrom(bytes) {
   // A v1 record has no consumer mask. Zero those bytes rather than carry
   // whatever a future version left in them, matching what the firmware does on
   // read so the editor and the device never disagree.
-  if (b[1] < VERSION) {
+  if (b[1] < VERSION_CONSUMER) {
     b[CONSUMER_MASK_OFF] = 0;
     b[CONSUMER_MASK_OFF + 1] = 0;
+  }
+  // Same for slot colours: an older record has reserved bytes there, not
+  // colours. Substituting the defaults is what the firmware does.
+  if (b[1] < VERSION) {
+    DEFAULT_SLOT_COLORS.forEach((c, i) => b.set(c, SLOT_COLORS_OFF + i * 3));
   }
   raw = b;
   draft = b.slice(0, CONFIG_LEN);
@@ -535,10 +570,13 @@ function exportJson() {
   out[CHECKSUM_OFF] = checksum(out);
   const profile = {
     kind: "pico-numpad-profile",
-    version: 2,
+    version: 3,
     exported: new Date().toISOString(),
     brightness: draft[BRIGHTNESS_OFF],
     ledMode: draft[LEDMODE_OFF],
+    slotColors: Array.from({ length: 3 }, (_, i) =>
+      Array.from(draft.slice(SLOT_COLORS_OFF + i * 3, SLOT_COLORS_OFF + i * 3 + 3)),
+    ),
     keymap: Array.from({ length: 16 }, (_, i) => ({
       physical: PHYS[i],
       usage: draft[KEYMAP_OFF + i],
@@ -581,6 +619,14 @@ function importJson(file) {
       }
       if (Number.isInteger(p.brightness)) next[BRIGHTNESS_OFF] = Math.min(31, p.brightness) & 0xff;
       if (Number.isInteger(p.ledMode)) next[LEDMODE_OFF] = p.ledMode & 0xff;
+      if (Array.isArray(p.slotColors)) {
+        p.slotColors.slice(0, 3).forEach((c, i) => {
+          if (!Array.isArray(c) || c.length !== 3 || !c.every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) {
+            throw new Error(`slotColors[${i}] must be three bytes 0-255`);
+          }
+          next.set(c, SLOT_COLORS_OFF + i * 3);
+        });
+      }
       draft = next;
       renderAll();
       toast("Profile loaded into the grid. Not saved — use Save to flash.", "warn", 5000);
@@ -605,6 +651,9 @@ function setControls() {
   $("defaults").disabled = !on;
   $("brightness").disabled = !on;
   $("ledMode").disabled = !on;
+  for (let i = 0; i < 3; i++) {
+    $("slotColor" + i).disabled = !on;
+  }
   $("preset").disabled = !on;
   $("search").disabled = !on;
   refreshDirty();
@@ -711,6 +760,13 @@ $("ledMode").addEventListener("change", (e) => {
   draft[LEDMODE_OFF] = Number(e.target.value) & 0xff;
   refreshDirty();
 });
+
+for (let i = 0; i < 3; i++) {
+  $("slotColor" + i).addEventListener("input", (e) => {
+    draft.set(hexToRgb(e.target.value), SLOT_COLORS_OFF + i * 3);
+    refreshDirty();
+  });
+}
 
 const presetSel = $("preset");
 for (const [id, p] of Object.entries(PRESETS)) {

@@ -18,7 +18,10 @@
 /// get the request rejected.
 pub const UNIT_US: u32 = 1_250;
 
-/// The BLE minimum connection interval, in units.
+/// The BLE minimum connection interval, in units. Test-only: measurement put
+/// the host-granted floor at 15 ms, well above this, so no shipped profile
+/// references it -- it survives to keep `is_valid` honest about the spec.
+#[cfg(test)]
 pub const MIN_INTERVAL_UNITS: u16 = 6;
 
 /// Connection parameters to request. Kept as plain integers rather than the
@@ -31,11 +34,13 @@ pub struct Params {
     pub supervision_ms: u32,
 }
 
-/// Typing profile: the floor interval, no latency. Every event answered, so a
-/// keystroke waits at most one interval.
+/// Typing profile: no latency, so every event is answered and a keystroke
+/// waits at most one interval. 15 ms because that is the lowest interval macOS
+/// has been measured to accept; the 7.5 ms BLE floor was rejected on both the
+/// idle and the active request.
 pub const ACTIVE: Params = Params {
-    interval_min_units: MIN_INTERVAL_UNITS,
-    interval_max_units: 8,
+    interval_min_units: 12,
+    interval_max_units: 12,
     latency: 0,
     supervision_ms: 2_000,
 };
@@ -123,14 +128,49 @@ pub const fn units_from_us(us: u64) -> u16 {
     }
 }
 
+/// Giving-up, tracked per direction. The two directions are not
+/// interchangeable: a battery optimization that keeps failing only costs
+/// battery, while being unable to ask for the fast link back would strand the
+/// pad on a slow link for the rest of the connection. Each decides for itself,
+/// and one never silences the other.
+#[derive(Clone, Copy, Debug)]
+struct Ledger {
+    refusals: u8,
+    abandoned: bool,
+}
+
+impl Ledger {
+    const fn new() -> Self {
+        Self {
+            refusals: 0,
+            abandoned: false,
+        }
+    }
+
+    fn count(&mut self) {
+        if self.abandoned {
+            return;
+        }
+        self.refusals = self.refusals.saturating_add(1);
+        if self.refusals >= MAX_REFUSALS {
+            self.abandoned = true;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.refusals = 0;
+        self.abandoned = false;
+    }
+}
+
 /// When to ask the host for which profile, and when to stop asking.
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
     applied: Option<Profile>,
     in_flight: Option<Profile>,
     last_request: Option<u64>,
-    refusals: u8,
-    idle_abandoned: bool,
+    idle: Ledger,
+    active: Ledger,
 }
 
 impl Default for Policy {
@@ -146,8 +186,8 @@ impl Policy {
             applied: None,
             in_flight: None,
             last_request: None,
-            refusals: 0,
-            idle_abandoned: false,
+            idle: Ledger::new(),
+            active: Ledger::new(),
         }
     }
 
@@ -183,9 +223,7 @@ impl Policy {
                     // returned as `Ok`, so this silence is the only signal we
                     // were refused, and counting it is what stops us asking on
                     // every cooldown forever.
-                    if self.in_flight == Some(Profile::Idle) {
-                        self.count_failure();
-                    }
+                    self.charge_in_flight();
                     self.in_flight = None;
                 }
             }
@@ -194,7 +232,7 @@ impl Policy {
         if self.applied == Some(want) {
             return None;
         }
-        if want == Profile::Idle && self.idle_abandoned {
+        if self.ledger(want).abandoned {
             return None;
         }
         if since.is_some_and(|elapsed| elapsed < REQUEST_COOLDOWN_MS) {
@@ -211,33 +249,39 @@ impl Policy {
     /// Post: asking for Idle and being kept awake counts against it; a granted
     /// Idle proves the host can do it and clears the ledger.
     pub fn observe(&mut self, observed: Profile) {
-        let denied_idle = self.in_flight == Some(Profile::Idle) && observed != Profile::Idle;
+        match self.in_flight {
+            Some(asked) if asked == observed => self.ledger_mut(asked).reset(),
+            Some(asked) => self.ledger_mut(asked).count(),
+            None => {}
+        }
         self.applied = Some(observed);
         self.in_flight = None;
-        if denied_idle {
-            self.count_failure();
-        } else {
-            self.refusals = 0;
-            self.idle_abandoned = false;
-        }
     }
 
     /// The host rejected the request outright, for the cases where the stack
     /// actually propagates it.
     pub fn refused(&mut self) {
-        if self.in_flight == Some(Profile::Idle) {
-            self.count_failure();
-        }
+        self.charge_in_flight();
         self.in_flight = None;
     }
 
-    fn count_failure(&mut self) {
-        if self.idle_abandoned {
-            return;
+    fn charge_in_flight(&mut self) {
+        if let Some(asked) = self.in_flight {
+            self.ledger_mut(asked).count();
         }
-        self.refusals = self.refusals.saturating_add(1);
-        if self.refusals >= MAX_REFUSALS {
-            self.idle_abandoned = true;
+    }
+
+    fn ledger(&self, p: Profile) -> &Ledger {
+        match p {
+            Profile::Idle => &self.idle,
+            Profile::Active => &self.active,
+        }
+    }
+
+    fn ledger_mut(&mut self, p: Profile) -> &mut Ledger {
+        match p {
+            Profile::Idle => &mut self.idle,
+            Profile::Active => &mut self.active,
         }
     }
 
@@ -251,7 +295,13 @@ impl Policy {
     #[cfg(test)]
     #[must_use]
     pub const fn has_given_up_on_idle(&self) -> bool {
-        self.idle_abandoned
+        self.idle.abandoned
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn has_given_up_on_active(&self) -> bool {
+        self.active.abandoned
     }
 }
 
@@ -315,7 +365,7 @@ mod tests {
             .effective_ms(),
             600
         );
-        assert_eq!(ACTIVE.effective_ms(), 10, "8 units = 10 ms, no latency");
+        assert_eq!(ACTIVE.effective_ms(), 15, "12 units = 15 ms, no latency");
         assert_eq!(IDLE.effective_ms(), 600);
     }
 
@@ -494,6 +544,32 @@ mod tests {
         assert!(p.has_given_up_on_idle());
         t += REQUEST_COOLDOWN_MS + 1;
         assert_eq!(p.update(t, false, false), Some(Profile::Active));
+    }
+
+    #[test]
+    fn a_rejected_active_profile_stops_being_asked_too() {
+        // Measured: the 7.5-10 ms active profile was rejected by macOS, and
+        // with only Idle counting refusals we re-requested every cooldown for
+        // ever -- six rejected requests in a row while the user was typing.
+        let mut p = Policy::new();
+        p.observe(classify(IDLE));
+        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        for attempt in 2..=MAX_REFUSALS {
+            let t = u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1);
+            assert_eq!(
+                p.update(t, false, false),
+                Some(Profile::Active),
+                "attempt {attempt}"
+            );
+        }
+        let t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
+        assert_eq!(
+            p.update(t, false, false),
+            None,
+            "a rejected active profile must stop looping"
+        );
+        assert!(p.has_given_up_on_active());
+        assert!(!p.has_given_up_on_idle(), "the idle ledger is untouched");
     }
 
     #[test]

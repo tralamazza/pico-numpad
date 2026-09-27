@@ -27,7 +27,9 @@ Written in Rust using [Embassy](https://embassy.dev/) and
   releasing while amber selects the slot, releasing at red clears that bond.
 - Pairing uses passkey entry, not Just Works. The pad lights its digit keys and
   you type the six digits the host displays; `Enter` restarts the entry and `+`
-  cancels. Entry follows the printed layout rather than your remap. See
+  cancels. Entry follows the printed layout rather than your remap. The pad
+  refuses any link below authenticated encryption, so a host that cannot do
+  MITM pairing cannot pair at all. See
   [`docs/pairing.md`](docs/pairing.md).
 - The backlight turns off after 60 seconds with no input, and comes back on the
   next keypress.

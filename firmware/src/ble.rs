@@ -79,6 +79,92 @@ const HID_SERVICE_UUID: &[[u8; 2]] = &[[0x12, 0x18]];
 /// Advertisement interval while a slot still needs pairing or just lost its link.
 const ADV_INTERVAL_FAST: Duration = Duration::from_millis(160);
 
+/// The only security level this device will operate at. Anything below is
+/// refused rather than tolerated, so an unauthenticated link cannot be used by
+/// accident, cannot be persisted as a credential, and cannot be inherited on
+/// reconnect.
+///
+/// Consequence worth stating: a peer that cannot reach this level -- one that
+/// declares `NoInputNoOutput`, for which the method table yields Just Works --
+/// cannot pair at all. That is the deliberate cost of having no insecure path.
+pub const MIN_SECURITY: SecurityLevel = SecurityLevel::EncryptedAuthenticated;
+
+/// Drop a stored credential on the active slot that sits below the floor.
+/// Post: the slot holds no below-floor bond, or `false` is returned when the
+/// drop could not be persisted and the caller must refuse the peer rather than
+/// run with a credential it cannot prove it removed.
+async fn purge_weak_bond(hosts: &mut HostSlots) -> bool {
+    let Some(bond) = hosts.bonds[hosts.active as usize].as_ref() else {
+        return true;
+    };
+    if bond.security_level >= MIN_SECURITY {
+        return true;
+    }
+    warn!(
+        "stored bond on slot {} is below the security floor; dropping it",
+        hosts.active + 1
+    );
+    let mut next = hosts.clone();
+    next.bonds[hosts.active as usize] = None;
+    if !config_store::save_hosts(&next).await {
+        warn!("could not persist the dropped bond; refusing the connection");
+        return false;
+    }
+    *hosts = next;
+    true
+}
+
+/// Store a bond only if it was earned at or above the floor. Post: `false`
+/// means the caller must drop the link. A weak credential is never written, be-
+/// cause a stored bond is what a later reconnect replays with no pairing and
+/// no negotiation left to refuse.
+async fn commit_bond(
+    gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    hosts: &mut HostSlots,
+    security_level: SecurityLevel,
+    bond: Option<BondInformation>,
+) -> bool {
+    if security_level < MIN_SECURITY
+        || bond
+            .as_ref()
+            .is_some_and(|b| b.security_level < MIN_SECURITY)
+    {
+        warn!(
+            "pairing reached {:?}, below the floor; refusing",
+            security_level
+        );
+        return false;
+    }
+    if let Some(bond) = bond.filter(|b| b.is_bonded) {
+        let mut next = hosts.clone();
+        next.bonds[hosts.active as usize] = Some(bond);
+        if next != *hosts && !config_store::save_hosts(&next).await {
+            warn!("could not persist host bond");
+            return false;
+        }
+        *hosts = next;
+        let _ = gatt.raw().set_bondable(false);
+    }
+    info!("paired at {:?}", security_level);
+    true
+}
+
+/// The peer no longer holds our bond. Drop our half so the slot returns to
+/// pairable instead of keeping a credential that can never work again.
+async fn clear_lost_bond(hosts: &mut HostSlots) -> bool {
+    let mut next = hosts.clone();
+    next.bonds[hosts.active as usize] = None;
+    if next == *hosts {
+        return true;
+    }
+    if !config_store::save_hosts(&next).await {
+        warn!("could not persist the lost bond");
+        return false;
+    }
+    *hosts = next;
+    true
+}
+
 /// Advertisement interval for a bonded slot that has been sitting disconnected.
 const ADV_INTERVAL_IDLE: Duration = Duration::from_millis(800);
 
@@ -212,6 +298,38 @@ pub async fn run<C: Controller>(
     .await;
 }
 
+/// Build this slot's advertisement. Post: `buf` holds the encoded AD structures
+/// and the return value is how many of its 31 bytes were used, so the caller
+/// slices `buf[..n]` rather than guessing.
+fn advertisement(
+    slot: u8,
+    bonded: bool,
+    interval: Duration,
+    buf: &mut [u8; 31],
+    name_buf: &mut [u8; host_slots::MAX_ADV_NAME_LEN],
+) -> usize {
+    let adv_name = host_slots::adv_name(slot, bonded, name_buf);
+    let n = AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteServiceUuids16(HID_SERVICE_UUID),
+            AdStructure::CompleteLocalName(adv_name),
+        ],
+        buf,
+    )
+    .expect("advertising data");
+    // Inside the function so a ship build at a lower log level compiles the utf8
+    // decode away too.
+    debug!(
+        "advertising as \"{}\" (bonded={}, {} ms interval, {} of 31 advertisement bytes)",
+        core::str::from_utf8(adv_name).unwrap_or("<not utf8>"),
+        bonded,
+        interval.as_millis(),
+        u8::try_from(n).unwrap_or(u8::MAX)
+    );
+    n
+}
+
 async fn app_loop<C: Controller>(
     mut peripheral: Peripheral<'_, C, DefaultPacketPool>,
     server: &Server<'_>,
@@ -223,32 +341,20 @@ async fn app_loop<C: Controller>(
     let mut fast_cycles = 0u32;
     loop {
         let bonded = hosts.bonds[hosts.active as usize].is_some();
-        let adv_name = host_slots::adv_name(hosts.active, bonded, &mut adv_name_buf);
-        let n = AdStructure::encode_slice(
-            &[
-                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                AdStructure::CompleteServiceUuids16(HID_SERVICE_UUID),
-                AdStructure::CompleteLocalName(adv_name),
-            ],
-            &mut adv_data,
-        )
-        .expect("advertising data");
         let interval = adv_interval(bonded, fast_cycles);
         fast_cycles = fast_cycles.saturating_add(1);
+        let n = advertisement(
+            hosts.active,
+            bonded,
+            interval,
+            &mut adv_data,
+            &mut adv_name_buf,
+        );
         let params = AdvertisementParameters {
             interval_min: interval,
             interval_max: interval,
             ..AdvertisementParameters::default()
         };
-        // Inside the macro so a ship build at a higher log level compiles the
-        // decode away too.
-        debug!(
-            "advertising as \"{}\" (bonded={}, {} ms interval, {} of 31 advertisement bytes)",
-            core::str::from_utf8(adv_name).unwrap_or("<not utf8>"),
-            bonded,
-            interval.as_millis(),
-            u8::try_from(n).unwrap_or(u8::MAX)
-        );
         let advertiser = match peripheral
             .advertise(
                 &params,
@@ -282,6 +388,13 @@ async fn app_loop<C: Controller>(
         {
             Either3::First(Ok(conn)) => {
                 fast_cycles = 0;
+                // Never run on a stored credential below the floor, even one
+                // that would decrypt fine.
+                if !purge_weak_bond(hosts).await {
+                    conn.disconnect();
+                    Timer::after_millis(100).await;
+                    continue;
+                }
                 if let Some(bond) = &hosts.bonds[hosts.active as usize]
                     && !bond.identity.match_identity(&conn.peer_identity())
                 {
@@ -377,27 +490,12 @@ async fn connection_task(
                     security_level,
                     bond,
                 } => {
-                    info!("pairing complete: {:?}", security_level);
-                    if let Some(bond) = bond.filter(|b| b.is_bonded) {
-                        let mut next = hosts.clone();
-                        next.bonds[hosts.active as usize] = Some(bond);
-                        if next != *hosts {
-                            if !config_store::save_hosts(&next).await {
-                                warn!("could not persist host bond");
-                                return None;
-                            }
-                            *hosts = next;
-                        }
-                        let _ = gatt.raw().set_bondable(false);
-                    }
                     ui.end_passkey();
-                    // Only an authenticated link earns the green flash; an
-                    // unauthenticated pairing is not a success to celebrate.
-                    ui.flash(matches!(
-                        security_level,
-                        SecurityLevel::EncryptedAuthenticated
-                    ))
-                    .await;
+                    if !commit_bond(gatt, hosts, security_level, bond).await {
+                        refuse(gatt, report, consumer_report, ui).await;
+                        return None;
+                    }
+                    ui.flash(true).await;
                 }
                 GattConnectionEvent::PassKeyInput => {
                     info!("pairing needs the code the host is showing; type it on the pad");
@@ -413,6 +511,27 @@ async fn connection_task(
                     // hang until the peer gives up.
                     warn!("unexpected passkey display/confirm; cancelling");
                     let _ = gatt.pass_key_cancel();
+                }
+                GattConnectionEvent::Encrypted { security_level, .. } => {
+                    // Reconnect path: encrypted from a stored key with no
+                    // pairing and no negotiation left to refuse.
+                    if security_level < MIN_SECURITY {
+                        warn!(
+                            "link encrypted at {:?}, below the floor; refusing",
+                            security_level
+                        );
+                        refuse(gatt, report, consumer_report, ui).await;
+                        return None;
+                    }
+                    info!("link encrypted at {:?}", security_level);
+                }
+                GattConnectionEvent::BondLost => {
+                    warn!("bond lost on slot {}; clearing it", hosts.active + 1);
+                    if !clear_lost_bond(hosts).await {
+                        return None;
+                    }
+                    refuse(gatt, report, consumer_report, ui).await;
+                    return None;
                 }
                 GattConnectionEvent::PairingFailed(err) => {
                     ui.end_passkey();
@@ -430,24 +549,7 @@ async fn connection_task(
                 let Some(input) = ui.poll(hosts, true).await else {
                     continue;
                 };
-                match ui.passkey.take_outcome() {
-                    // Never logged: the passkey is the MITM secret, and a log
-                    // line outlives the pairing it protects.
-                    passkey::Outcome::Commit(code) => {
-                        info!("passkey submitted");
-                        if let Err(e) = gatt.pass_key_input(code) {
-                            warn!("pass_key_input failed: {:?}", e);
-                        }
-                        ui.end_passkey();
-                    }
-                    passkey::Outcome::Cancel | passkey::Outcome::Timeout => {
-                        info!("passkey entry aborted");
-                        let _ = gatt.pass_key_cancel();
-                        ui.end_passkey();
-                        ui.flash(false).await;
-                    }
-                    _ => {}
-                }
+                drive_passkey(gatt, ui).await;
                 if let Some(action) = input.action {
                     release_reports(gatt, report, consumer_report).await;
                     return Some(action);
@@ -468,6 +570,42 @@ async fn connection_task(
             }
         }
     }
+}
+
+/// Push whatever the passkey state machine produced into SMP. Post: entry has
+/// ended if it reached a terminal outcome. The code itself is never logged -- it
+/// is the MITM secret, and a log line outlives the pairing it protects.
+async fn drive_passkey(gatt: &GattConnection<'_, '_, DefaultPacketPool>, ui: &mut KeypadUi) {
+    match ui.passkey.take_outcome() {
+        passkey::Outcome::Commit(code) => {
+            info!("passkey submitted");
+            if let Err(e) = gatt.pass_key_input(code) {
+                warn!("pass_key_input failed: {:?}", e);
+            }
+            ui.end_passkey();
+        }
+        passkey::Outcome::Cancel | passkey::Outcome::Timeout => {
+            info!("passkey entry aborted");
+            let _ = gatt.pass_key_cancel();
+            ui.end_passkey();
+            ui.flash(false).await;
+        }
+        _ => {}
+    }
+}
+
+/// Tear down a link that does not meet the security floor. Post: reports are
+/// released so nothing sticks on the host, the link is dropped, and the user
+/// has been shown a refusal. The caller must return.
+async fn refuse(
+    gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    report: &Characteristic<[u8; REPORT_LEN]>,
+    consumer_report: &Characteristic<[u8; CONSUMER_REPORT_LEN]>,
+    ui: &mut KeypadUi,
+) {
+    release_reports(gatt, report, consumer_report).await;
+    gatt.raw().disconnect();
+    ui.flash(false).await;
 }
 
 /// Zero both reports before the pad stops sending real input, so a key that was

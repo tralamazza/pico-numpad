@@ -27,6 +27,42 @@ resolves to Just Works and it is not ours to prevent — the peer declined
 protection. `PairingComplete { security_level }` distinguishes the two, and
 only `EncryptedAuthenticated` gets the "it worked" indication.
 
+## A hard floor: refuse rather than tolerate
+
+`MIN_SECURITY = EncryptedAuthenticated`. Every security outcome is checked
+against it and anything below is refused. "Encrypted" alone is not the goal:
+Just Works encrypts, and encryption without authentication is precisely the
+property an attacker positioned mid-handshake wants.
+
+`SecurityLevel` is ordered (`NoEncryption < Encrypted < EncryptedAuthenticated`)
+and `BondInformation` carries the level it was earned at, so the credential is
+self-describing and the check is a comparison rather than a guess.
+
+Three places enforce it, because a weak link can arrive three ways:
+
+- **`PairingComplete`** — a below-floor credential is never persisted. Storing
+  one is worse than accepting one: the saved bond is what a later reconnect
+  replays with no pairing and no negotiation left to refuse.
+- **`Encrypted`** — the reconnect path. The link came up from a stored key with
+  no negotiation at all, which is where a weak bond rides in silently. Refused
+  on sight, independently of the check below.
+- **At accept, before `request_security`** — a stored bond already below the
+  floor is dropped and rewritten. This is what stops firmware upgraded over an
+  old Just Works pairing from inheriting it.
+
+`BondLost` clears the slot's half rather than keeping a credential that can
+never work again.
+
+LE legacy pairing is not a downgrade axis: `legacy-pairing` is enabled in
+neither our `Cargo.toml` nor trouble's defaults, so the LESC-less method table
+is not compiled in at all.
+
+The cost is availability, and it is accepted deliberately. A peer that cannot
+reach `EncryptedAuthenticated` -- one declaring `NoInputNoOutput`, which the
+method table maps to Just Works -- cannot pair with this device. There is no
+setting that reopens it, because a config path able to lower the floor would
+just be another downgrade path.
+
 ## The pad is the input device
 
 A numpad has ten digits and sixteen LEDs. Passkey entry is: one device shows

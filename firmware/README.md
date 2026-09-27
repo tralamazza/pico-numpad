@@ -526,8 +526,13 @@ the link fast at exactly the time it was least useful. Passkey entry overrides
 both: a human is waiting on each digit and that link is carrying the pairing
 secret.
 
-Because the target flips the moment USB is removed, the request for the fast
-link goes out on the unplug rather than on the first keypress afterwards.
+The target flips when the *host* goes away, not when VBUS does, so the request
+for the fast link rides on the state change rather than on the first keypress
+afterwards. On this hardware that path is narrower than it sounds: the pad has
+one USB-C connector, so unplugging a host usually takes its power too and the
+reboot re-evaluates the policy from scratch and lands on Active regardless.
+The case that genuinely exercises it is a host that suspends or drops
+enumeration while the pad keeps running.
 
 The honest cost is **latency on the first keypress after idle**, bounded by the
 effective period -- not by the interval. The request to come back to Active

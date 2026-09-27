@@ -456,12 +456,37 @@ Parameters`; **15 ms / latency 39 was granted in 0.57 s**. The interval was the
 objection, not the latency -- macOS appears to treat the 15 ms it picks at
 connect as its floor, and is unbothered by a slave latency of 39.
 
-| profile | interval | latency | effective | status on macOS |
+| profile | interval | latency | effective | measured on macOS |
 |---|---|---|---|---|
-| Active | 7.5-10 ms | 0 | <= 10 ms | never sent; host's own 15 ms classifies Active |
-| Active | 15 ms | 22 | 345 ms | what the host actually runs |
-| Idle | 15 ms | 39 | 600 ms | granted |
-| Idle | 7.5 ms | 79 | 600 ms | rejected |
+| host default at connect | 15 ms | 22 | 345 ms | what macOS picks unprompted |
+| Active, first attempt | 7.5-10 ms | 0 | <= 10 ms | **rejected** |
+| Active, shipped | 15 ms | 0 | 15 ms | **granted** on wake, 0.74 s |
+| Idle, first attempt | 7.5 ms | 79 | 600 ms | **rejected** |
+| Idle, shipped | 15 ms | 39 | 600 ms | **granted**, 0.51 s |
+
+Every rejection in that table was the 7.5 ms interval. macOS took a slave
+latency of 39 without objection, so the interval was the only thing it was
+guarding -- and it guards it on the way back up as well as the way down, which
+is why the shipped Active profile had to be corrected too.
+
+Full measured lifecycle:
+
+```
+  4.09  link is 15 ms / latency 22 / timeout 2000 ms   host default, 345 ms
+ 60.01  requesting idle link parameters (600 ms effective)
+ 60.51  link is 15 ms / latency 39 / timeout 2000 ms   granted
+122.97  requesting active link parameters (15 ms effective)   same ms as the keypress
+123.71  link is 15 ms / latency 0 / timeout 2000 ms    granted
+```
+
+Two requests total, zero rejections, nothing asked again afterwards. The Active
+request fires in the same millisecond as the keypress, so returning to full
+speed is not delayed by our own polling.
+
+What this log cannot show is the **first-key delay itself** -- the pad notices a
+keypress instantly on its interrupt, but cannot transmit until a connection
+event it is scheduled to be awake for, so that delay is bounded by the 600 ms
+wake period and is only observable at the host, not here.
 
 The supervision timeout must exceed `2 x effective`, so 600 ms of skipped
 events needs more than 1.2 s; both profiles use 2 s. Raising the idle latency
@@ -512,8 +537,9 @@ Anti-thrash matters more than the numbers, because hosts do what they like:
   `RequestConnectionParams` is accepted -- if macOS overrules us that is
   adopted, not argued with.
 
-Measured end to end: one request at the 60 s blank, granted in 0.57 s, zero
-rejections, and no further requests across 96 s of idle afterwards.
+Measured end to end across two runs: one request at the 60 s blank, granted in
+half a second, and no further requests across 96 s of idle afterwards. The
+lifecycle trace above is the full round trip including the way back up.
 
 What the log says, for the next person to read a trace: `link is N ms / latency
 L / timeout T ms` is what the host granted, and `requesting idle link

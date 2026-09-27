@@ -694,10 +694,12 @@ async fn drive_link_power<C>(
         + ControllerCmdSync<LeReadLocalSupportedFeatures>,
 {
     let now = Instant::now().as_millis();
-    let Some(profile) = ui
-        .power
-        .update(now, ui.blanked, crate::usb::keyboard_active())
-    else {
+    let state = power::State {
+        blank: ui.blanked,
+        usb_host: crate::usb::usb_host_active(),
+        pairing: ui.passkey.is_active(),
+    };
+    let Some(profile) = ui.power.update(now, state) else {
         return;
     };
     match gatt
@@ -859,15 +861,15 @@ impl KeypadUi {
             return Some(self.render_passkey(hosts).await);
         }
         let mut input = self.controls.update(now, pressed);
-        let usb_active = crate::usb::keyboard_active();
-        let (usb_keys, ble_keys) = self.router.update(input.keys, usb_active, connected);
+        let host_on_usb = crate::usb::usb_host_active();
+        let (usb_keys, ble_keys) = self.router.update(input.keys, host_on_usb, connected);
         let (usb_kbd, usb_consumer) = {
             let cfg = CONFIG.lock().await;
             build_reports(usb_keys, &cfg.keymap, cfg.consumer_mask)
         };
         crate::usb::publish_reports(usb_kbd, usb_consumer).await;
         input.keys = ble_keys;
-        let connected = connected || usb_active;
+        let connected = connected || host_on_usb;
         let (mode, mut brightness, slot_colors) = {
             let cfg = CONFIG.lock().await;
             (cfg.led_mode, cfg.brightness, cfg.slot_colors)

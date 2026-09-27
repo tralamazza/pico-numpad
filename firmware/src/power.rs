@@ -179,6 +179,48 @@ impl Default for Policy {
     }
 }
 
+/// What the link policy knows about the world right now.
+///
+/// A struct rather than three positional booleans: the argument order is
+/// precisely where a wrong mental model hid last time, and a named field is
+/// harder to mis-pass than a bare `bool`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct State {
+    /// The backlight has blanked for inactivity -- nobody is touching the pad.
+    pub blank: bool,
+    /// A USB host is actively driving the keyboard: enumerated, and not
+    /// suspended. This is *not* "USB has power" -- a power bank presents 5 V
+    /// and never enumerates, so it reads `false` here.
+    pub usb_host: bool,
+    /// A passkey entry is in progress, so the BLE link is carrying the pairing
+    /// secret and a human is waiting on each digit.
+    pub pairing: bool,
+}
+
+impl State {
+    /// The profile the current state calls for.
+    ///
+    /// A live USB host means the BLE link is carrying no input at all -- input
+    /// routes over USB -- so a fast BLE link is worth nothing at that moment
+    /// and idling it is close to free. Note this is the opposite of the
+    /// reasoning this code originally shipped with, which assumed a USB
+    /// connection meant mains power and therefore no reason to save. On a USB
+    /// power bank every watt still comes out of a cell.
+    ///
+    /// Passkey entry overrides both: the user is mid-code at the keyboard and
+    /// the link is the thing carrying the secret.
+    #[must_use]
+    pub const fn desired_profile(self) -> Profile {
+        if self.pairing {
+            Profile::Active
+        } else if self.usb_host || self.blank {
+            Profile::Idle
+        } else {
+            Profile::Active
+        }
+    }
+}
+
 impl Policy {
     #[must_use]
     pub const fn new() -> Self {
@@ -191,16 +233,10 @@ impl Policy {
         }
     }
 
-    /// The profile the current state calls for. On USB the target is always
-    /// Active: VBUS is paying for the device, so trading keystroke latency for
-    /// battery saves nothing.
+    /// The profile the current state calls for.
     #[must_use]
-    pub const fn target(blank: bool, usb: bool) -> Profile {
-        if blank && !usb {
-            Profile::Idle
-        } else {
-            Profile::Active
-        }
+    pub const fn target(state: State) -> Profile {
+        state.desired_profile()
     }
 
     /// Feed one observation. Post: `Some(profile)` means send that request now,
@@ -210,7 +246,7 @@ impl Policy {
     /// a pad that cannot ask for the fast link back is broken for the rest of
     /// the connection, whereas a battery optimization that keeps failing only
     /// costs battery.
-    pub fn update(&mut self, now: u64, blank: bool, usb: bool) -> Option<Profile> {
+    pub fn update(&mut self, now: u64, state: State) -> Option<Profile> {
         // `Option` rather than a 0 sentinel: a request made at t=0 is a real
         // request, and reading it as "never asked" would skip the cooldown.
         let since = self.last_request.map(|at| now.saturating_sub(at));
@@ -228,7 +264,7 @@ impl Policy {
                 }
             }
         }
-        let want = Self::target(blank, usb);
+        let want = Self::target(state);
         if self.applied == Some(want) {
             return None;
         }
@@ -321,6 +357,15 @@ pub fn classify(params: Params) -> Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The common case for these tests: BLE is the only transport in play.
+    const fn st(blank: bool) -> State {
+        State {
+            blank,
+            usb_host: false,
+            pairing: false,
+        }
+    }
 
     #[test]
     fn both_profiles_satisfy_the_link_layers_own_bounds() {
@@ -427,58 +472,127 @@ mod tests {
     #[test]
     fn a_blank_backlight_asks_for_the_idle_profile() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
         p.observe(Profile::Active);
         let t = REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t, true, false), Some(Profile::Idle));
+        assert_eq!(p.update(t, st(true)), Some(Profile::Idle));
     }
 
     #[test]
-    fn usb_never_asks_for_idle_because_vbus_is_already_paying() {
-        assert_eq!(Policy::target(true, true), Profile::Active);
-        assert_eq!(Policy::target(true, false), Profile::Idle);
-        assert_eq!(Policy::target(false, true), Profile::Active);
+    fn a_live_usb_host_lets_the_ble_link_go_idle() {
+        // Input routes over USB, so a fast BLE link carries nothing at that
+        // moment. This inverts the assumption this code originally shipped
+        // with, which took a USB connection to mean mains power and therefore
+        // no reason to save. On a power bank every watt still comes out of a
+        // cell, and the link we are holding is not being used.
+        let host = State {
+            usb_host: true,
+            ..State::default()
+        };
+        assert_eq!(host.desired_profile(), Profile::Idle);
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, true), Some(Profile::Active));
-        p.observe(Profile::Active);
-        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, true, true), None);
+        assert_eq!(p.update(0, host), Some(Profile::Idle));
+        p.observe(Profile::Idle);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, host), None);
+    }
+
+    #[test]
+    fn a_power_bank_is_not_a_usb_host_because_it_never_enumerates() {
+        // The whole discrimination rests on this: a charger presents 5 V and
+        // never sends SET_CONFIGURATION, so `usb_host` stays false and the pad
+        // keeps the blank-only rule rather than idling while it is the live
+        // transport.
+        let on_bank = State {
+            blank: false,
+            usb_host: false,
+            pairing: false,
+        };
+        assert_eq!(on_bank.desired_profile(), Profile::Active);
+        assert_eq!(
+            State {
+                blank: true,
+                ..on_bank
+            }
+            .desired_profile(),
+            Profile::Idle
+        );
+    }
+
+    #[test]
+    fn passkey_entry_keeps_the_link_fast_even_under_a_usb_host() {
+        // A human is waiting on each digit and this link is carrying the
+        // pairing secret; neither is a thing to put on a 600 ms schedule.
+        assert_eq!(
+            State {
+                usb_host: true,
+                pairing: true,
+                blank: false,
+            }
+            .desired_profile(),
+            Profile::Active
+        );
+        // And it wins over the blank rule too, not merely over the host rule.
+        assert_eq!(
+            State {
+                usb_host: false,
+                pairing: true,
+                blank: true,
+            }
+            .desired_profile(),
+            Profile::Active
+        );
+    }
+
+    #[test]
+    fn losing_the_usb_host_puts_the_link_back_on_the_active_footings() {
+        // Unplugging must not leave BLE parked; it has just become the only
+        // transport. Requested on the state change, not on the first keypress.
+        let mut p = Policy::new();
+        let host = State {
+            usb_host: true,
+            ..State::default()
+        };
+        assert_eq!(p.update(0, host), Some(Profile::Idle));
+        p.observe(Profile::Idle);
+        let unplugged = State::default();
+        assert_eq!(
+            p.update(REQUEST_COOLDOWN_MS + 1, unplugged),
+            Some(Profile::Active)
+        );
     }
 
     #[test]
     fn it_does_not_re_ask_for_a_profile_that_is_already_applied() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
         p.observe(Profile::Active);
-        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, false, false), None);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, st(false)), None);
     }
 
     #[test]
     fn requests_are_rate_limited_so_a_picky_host_cannot_cause_thrash() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
         p.refused();
-        assert_eq!(p.update(1_000, true, false), None);
-        assert_eq!(p.update(REQUEST_COOLDOWN_MS - 1, true, false), None);
-        assert_eq!(
-            p.update(REQUEST_COOLDOWN_MS, true, false),
-            Some(Profile::Idle)
-        );
+        assert_eq!(p.update(1_000, st(true)), None);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS - 1, st(true)), None);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS, st(true)), Some(Profile::Idle));
     }
 
     #[test]
     fn a_request_stays_in_flight_and_does_not_stack_another() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
-        assert_eq!(p.update(1, true, false), None);
-        assert_eq!(p.update(REQUEST_ACK_MS - 1, true, false), None);
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
+        assert_eq!(p.update(1, st(true)), None);
+        assert_eq!(p.update(REQUEST_ACK_MS - 1, st(true)), None);
     }
 
     #[test]
     fn a_silent_request_eventually_releases_so_the_policy_cannot_wedge() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
         let t = REQUEST_COOLDOWN_MS.max(REQUEST_ACK_MS) + 1;
-        assert_eq!(p.update(t, true, false), Some(Profile::Idle));
+        assert_eq!(p.update(t, st(true)), Some(Profile::Idle));
     }
 
     #[test]
@@ -490,7 +604,7 @@ mod tests {
         let mut t = 0;
         for attempt in 1..=MAX_REFUSALS {
             assert_eq!(
-                p.update(t, true, false),
+                p.update(t, st(true)),
                 Some(Profile::Idle),
                 "still trying at refusal {attempt}"
             );
@@ -502,7 +616,7 @@ mod tests {
             p.has_given_up_on_idle(),
             "a host that never lets us sleep must be given up on"
         );
-        assert_eq!(p.update(t, true, false), None);
+        assert_eq!(p.update(t, st(true)), None);
     }
 
     #[test]
@@ -512,17 +626,17 @@ mod tests {
         // Measured against macOS, which rejected the profile 14 times without
         // our `Err` arm firing once.
         let mut p = Policy::new();
-        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        assert_eq!(p.update(0, st(true)), Some(Profile::Idle));
         for attempt in 2..=MAX_REFUSALS {
             let t = u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1);
             assert_eq!(
-                p.update(t, true, false),
+                p.update(t, st(true)),
                 Some(Profile::Idle),
                 "still trying at attempt {attempt}"
             );
         }
         let t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
-        assert_eq!(p.update(t, true, false), None, "silence must add up");
+        assert_eq!(p.update(t, st(true)), None, "silence must add up");
         assert!(p.has_given_up_on_idle());
     }
 
@@ -532,18 +646,18 @@ mod tests {
         // optimization also silenced Active, a few refusals early in a
         // connection would strand the pad on a slow link forever.
         let mut p = Policy::new();
-        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        assert_eq!(p.update(0, st(true)), Some(Profile::Idle));
         for attempt in 2..=MAX_REFUSALS {
             assert_eq!(
-                p.update(u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1), true, false),
+                p.update(u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1), st(true)),
                 Some(Profile::Idle)
             );
         }
         let mut t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
-        assert_eq!(p.update(t, true, false), None);
+        assert_eq!(p.update(t, st(true)), None);
         assert!(p.has_given_up_on_idle());
         t += REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t, false, false), Some(Profile::Active));
+        assert_eq!(p.update(t, st(false)), Some(Profile::Active));
     }
 
     #[test]
@@ -553,18 +667,18 @@ mod tests {
         // ever -- six rejected requests in a row while the user was typing.
         let mut p = Policy::new();
         p.observe(classify(IDLE));
-        assert_eq!(p.update(0, false, false), Some(Profile::Active));
+        assert_eq!(p.update(0, st(false)), Some(Profile::Active));
         for attempt in 2..=MAX_REFUSALS {
             let t = u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1);
             assert_eq!(
-                p.update(t, false, false),
+                p.update(t, st(false)),
                 Some(Profile::Active),
                 "attempt {attempt}"
             );
         }
         let t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
         assert_eq!(
-            p.update(t, false, false),
+            p.update(t, st(false)),
             None,
             "a rejected active profile must stop looping"
         );
@@ -575,15 +689,12 @@ mod tests {
     #[test]
     fn a_granted_idle_proves_the_host_can_do_it_and_clears_the_ledger() {
         let mut p = Policy::new();
-        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        assert_eq!(p.update(0, st(true)), Some(Profile::Idle));
+        p.observe(classify(ACTIVE));
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS, st(true)), Some(Profile::Idle));
         p.observe(classify(ACTIVE));
         assert_eq!(
-            p.update(REQUEST_COOLDOWN_MS, true, false),
-            Some(Profile::Idle)
-        );
-        p.observe(classify(ACTIVE));
-        assert_eq!(
-            p.update(2 * REQUEST_COOLDOWN_MS, true, false),
+            p.update(2 * REQUEST_COOLDOWN_MS, st(true)),
             Some(Profile::Idle)
         );
         p.observe(classify(IDLE));
@@ -636,12 +747,12 @@ mod tests {
     #[test]
     fn going_active_is_never_delayed_by_the_idle_state() {
         let mut p = Policy::new();
-        p.update(0, false, false);
+        p.update(0, st(false));
         p.observe(Profile::Active);
         let t = REQUEST_COOLDOWN_MS + 1;
-        p.update(t, true, false);
+        p.update(t, st(true));
         p.observe(Profile::Idle);
         let t2 = t + REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t2, false, false), Some(Profile::Active));
+        assert_eq!(p.update(t2, st(false)), Some(Profile::Active));
     }
 }

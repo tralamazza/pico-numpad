@@ -39,7 +39,15 @@ pub async fn publish_reports(report: [u8; REPORT_LEN], consumer: [u8; CONSUMER_R
     *CONSUMER_REPORT.lock().await = (generation, consumer);
 }
 
-pub fn keyboard_active() -> bool {
+/// A USB host is actively driving the keyboard: enumerated, and not suspended.
+///
+/// This is *not* "USB has power", which is what the name it replaced implied.
+/// A power bank or wall charger presents 5 V and never enumerates, so this
+/// stays false; a sleeping host also reads false, because we are not being
+/// used. What it actually answers is "if a key is pressed right now, does it
+/// go out over USB?" -- which is the question every routing and power
+/// decision here really turns on.
+pub fn usb_host_active() -> bool {
     CONFIGURED.load(Ordering::Relaxed) && !SUSPENDED.load(Ordering::Relaxed)
 }
 
@@ -69,11 +77,11 @@ async fn keyboard_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 9>)
     let mut generation = GENERATION.load(Ordering::Relaxed);
     loop {
         let current = GENERATION.load(Ordering::Relaxed);
-        if generation != current || !keyboard_active() {
+        if generation != current || !usb_host_active() {
             last = None;
             generation = current;
         }
-        if keyboard_active() {
+        if usb_host_active() {
             let (report_generation, value) = *KEY_REPORT.lock().await;
             // Never replay a report from before reset, unconfigure, or suspend.
             let report = if report_generation == current {
@@ -100,11 +108,11 @@ async fn consumer_loop<D: Driver<'static>>(mut writer: HidWriter<'static, D, 3>)
     let mut generation = GENERATION.load(Ordering::Relaxed);
     loop {
         let current = GENERATION.load(Ordering::Relaxed);
-        if generation != current || !keyboard_active() {
+        if generation != current || !usb_host_active() {
             last = None;
             generation = current;
         }
-        if keyboard_active() {
+        if usb_host_active() {
             let (consumer_generation, consumer_value) = *CONSUMER_REPORT.lock().await;
             let consumer = if consumer_generation == current {
                 consumer_value

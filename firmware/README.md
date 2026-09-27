@@ -424,12 +424,25 @@ has nothing to act on. The cyw43 crate exposes no Bluetooth-specific power knob.
 BLE power is governed by the link layer itself -- connection interval, slave
 latency and advertising interval -- not by this call.
 
-**Turning BLE off while USB is connected saves no battery.** When USB is plugged
-in, VBUS is present and the Pico powers from it, so the battery is not being
-drained in the first place. The battery case is BLE-only operation, where USB is
-absent by definition -- so the change cannot help in the case that matters. It
-would only avoid work the USB supply is already paying for, while adding a
-resume-on-unplug path that can fail. Not implemented.
+**"USB connected" does not mean "power does not matter".** This section used to
+argue that a connected USB supply makes battery savings moot, so the BLE link
+should stay fast while plugged in. That holds for a wall socket and nowhere else:
+on a USB power bank every milliwatt still comes out of a cell, and the pad can
+run for hours with no mains in sight.
+
+The distinction that actually matters is not where the power comes from but
+**who is reading the keys**. `usb::usb_host_active()` reports whether a host
+has enumerated us and is not suspended -- true of a Mac, false of a charger,
+because a power bank presents 5 V and never sends `SET_CONFIGURATION`. That is
+the signal the link policy keys on, not VBUS and not USB typing activity.
+
+**Power banks cut out at light loads.** Many disconnect below roughly 50-80 mA
+to decide nothing is connected, which is exactly where a blank-backlit BLE pad
+lives. Making this device thriftier can therefore make the bank switch itself
+off and the pad looks dead. Before chasing a low average current, check the
+bank's own LEDs during idle, or use one with a low-current / always-on mode.
+This is also a standing argument for a cell on the device itself: nothing then
+decides on our behalf.
 
 ### Connected-BLE idle power
 
@@ -502,9 +515,19 @@ interval low enough that returning to full speed is quick.
 
 Idle is entered when the backlight blanks for inactivity, not on a separate
 timer -- the blank already means "nobody is touching this", and a second idle
-clock would be a second thing to keep in sync. On USB the target is always
-Active, for the same reason the previous two sections gave: VBUS is already
-paying, so there is nothing to buy with keystroke latency.
+clock would be a second thing to keep in sync.
+
+A live USB host **inverts** the rule rather than suppressing it. When a host is
+enumerated and awake, input travels over USB and the BLE link carries nothing at
+all, so a fast BLE link is worth nothing at that moment and the target is Idle
+even while the user is typing. The opposite of what an earlier revision of this
+policy assumed, which read a USB connection as free power and therefore kept
+the link fast at exactly the time it was least useful. Passkey entry overrides
+both: a human is waiting on each digit and that link is carrying the pairing
+secret.
+
+Because the target flips the moment USB is removed, the request for the fast
+link goes out on the unplug rather than on the first keypress afterwards.
 
 The honest cost is **latency on the first keypress after idle**, bounded by the
 effective period -- not by the interval. The request to come back to Active

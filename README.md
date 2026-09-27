@@ -35,8 +35,11 @@ Written in Rust using [Embassy](https://embassy.dev/) and
   next keypress. The BLE link follows the same signal: when the pad goes idle it
   asks the host to skip connection events via slave latency, stretching the gap
   between wakeups from ~345 ms to 600 ms, and asks for the fast link back on the
-  first keypress. The host grants what it likes; on USB no idle request is made,
-  since VBUS is already powering the device.
+  first keypress. The host grants what it likes. A live USB host inverts the
+  rule — input is travelling over USB, so the BLE link carries nothing and is
+  idled even while you type. A power bank does not count: it never enumerates,
+  so the pad treats itself as BLE-driven. See
+  [`firmware/README.md`](firmware/README.md#power).
 - Bluetooth advertising runs at 160 ms for the first 30 cycles after boot or a
   disconnect, then 800 ms.
 - The key matrix is read on the I/O expander's interrupt line rather than polled.

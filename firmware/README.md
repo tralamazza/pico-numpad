@@ -448,28 +448,32 @@ power budget and the worst-case delay on the first keypress after idle.
 Measured on macOS at connect: 15 ms / latency 22 = **345 ms** effective. Any
 idle profile whose effective period is below that is a regression, which is how
 the first version of this feature turned out: 150 ms / latency 0 asked for a
-shorter sleep than the host was already taking.
+*shorter* sleep than the host was already taking.
 
-Both profiles sit at the 7.5 ms floor interval, so granularity is retained for
-when the user comes back and latency does all the idle work:
+What the host actually grants was measured rather than guessed, and it set the
+profile. **7.5 ms / latency 79 was rejected** with `Unacceptable Connection
+Parameters`; **15 ms / latency 39 was granted in 0.57 s**. The interval was the
+objection, not the latency -- macOS appears to treat the 15 ms it picks at
+connect as its floor, and is unbothered by a slave latency of 39.
 
-| profile | interval | latency | effective |
-|---|---|---|---|
-| Active | 7.5-10 ms | 0 | <= 10 ms |
-| Idle | 7.5 ms | 79 | 600 ms |
+| profile | interval | latency | effective | status on macOS |
+|---|---|---|---|---|
+| Active | 7.5-10 ms | 0 | <= 10 ms | never sent; host's own 15 ms classifies Active |
+| Active | 15 ms | 22 | 345 ms | what the host actually runs |
+| Idle | 15 ms | 39 | 600 ms | granted |
+| Idle | 7.5 ms | 79 | 600 ms | rejected |
 
 The supervision timeout must exceed `2 x effective`, so 600 ms of skipped
 events needs more than 1.2 s; both profiles use 2 s. Raising the idle latency
 buys battery linearly and costs first-key latency linearly, so it is bounded by
-feel rather than by the stack. Intervals are stored in link-layer units of
+feel rather than by the host. Intervals are stored in link-layer units of
 1.25 ms because the 7.5 ms floor is not an integer number of milliseconds --
-storing ms would round the floor to 6.25 ms and get the request rejected.
+storing ms rounds it to 6.25 ms and gets the request rejected.
 
-One consequence worth naming: at a 7.5 ms interval with a high latency the host
-keeps polling at 7.5 ms while we sleep through those polls, so radio duty moves
-to the host instead of disappearing. That is the price of keeping the link
-fine-grained. A longer idle interval would spare the host's radio for the same
-saving on ours.
+One consequence worth naming: at a 15 ms interval with a high latency the host
+keeps polling every 15 ms while we sleep through those polls, so radio duty
+moves to the host instead of disappearing. That is the price of keeping the
+interval low enough that returning to full speed is quick.
 
 Idle is entered when the backlight blanks for inactivity, not on a separate
 timer -- the blank already means "nobody is touching this", and a second idle
@@ -487,13 +491,20 @@ Anti-thrash matters more than the numbers, because hosts do what they like:
   from what we asked cannot cause oscillation.
 - A request with no observed effect for 5 s is released, so the policy cannot
   wedge on a request that never landed.
+- **A silent idle request counts as a refusal, because there is no other
+  signal.** trouble logs a rejected parameter update and returns `Ok`
+  (`host.rs:1499`), so the stack never tells us we were refused. Measured: 16
+  requests in 90 s with our `Err` arm firing zero times. The absence of the
+  expected `ConnectionParamsUpdated` is the only thing that can detect it.
 - Applied state follows what the host *settled on*, never our own request. An
   accepted request is not an applied one.
-- Asking to sleep and being kept awake counts as a refusal even though nothing
-  errored. Without this an unsatisfiable idle target would be re-requested on
-  every cooldown forever, because no failure ever arrives.
-- After 3 refusals the policy mutes permanently. A host that will not grant it
-  is not going to, and a request every cooldown is worse than no request.
+- Asking to sleep and being kept awake counts against it, even though nothing
+  errored. Without this an unsatisfiable idle target is re-requested forever,
+  because no failure ever arrives to say so.
+- **After 3 refusals the policy gives up on Idle only, never on Active.** A pad
+  that cannot ask for the fast link back is broken for the rest of the
+  connection; a battery optimization that keeps failing only costs battery.
+  These are not the same failure and must not share a kill switch.
 - `ConnectionParamsUpdated` is folded back in via `classify()`, which reads the
   effective period and not the raw interval. A short interval paired with a big
   latency *is* asleep, and a long interval with no latency is *not*; comparing
@@ -501,10 +512,14 @@ Anti-thrash matters more than the numbers, because hosts do what they like:
   `RequestConnectionParams` is accepted -- if macOS overrules us that is
   adopted, not argued with.
 
-What the host actually granted is in the RTT log: `link is N ms / latency L /
-timeout T ms` after connecting, and `requesting idle link parameters (E ms
-effective)` when we ask. The first measurement of this on macOS is in the table
-above; the idle request itself has not yet been re-measured at these numbers.
+Measured end to end: one request at the 60 s blank, granted in 0.57 s, zero
+rejections, and no further requests across 96 s of idle afterwards.
+
+What the log says, for the next person to read a trace: `link is N ms / latency
+L / timeout T ms` is what the host granted, and `requesting idle link
+parameters (E ms effective)` is us asking. An `Unacceptable Connection
+Parameters` warning from `trouble_host` immediately after a request means the
+host refused, and it will not surface anywhere in our own logs.
 
 ## Storage
 

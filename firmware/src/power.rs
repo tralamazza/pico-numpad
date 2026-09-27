@@ -40,13 +40,14 @@ pub const ACTIVE: Params = Params {
     supervision_ms: 2_000,
 };
 
-/// Idle profile: same floor interval, latency doing all the work. Kept at the
-/// floor so that when the user comes back the link is already fine-grained and
-/// only the first keystroke pays the sleep depth.
+/// Idle profile: latency doing all the work. 15 ms was measured as the value
+/// macOS itself picks at connect; 7.5 ms was rejected outright, so this is the
+/// lowest interval the host we target will actually grant. 15 x 40 events puts
+/// the effective period at 600 ms.
 pub const IDLE: Params = Params {
-    interval_min_units: MIN_INTERVAL_UNITS,
-    interval_max_units: MIN_INTERVAL_UNITS,
-    latency: 79,
+    interval_min_units: 12,
+    interval_max_units: 12,
+    latency: 39,
     supervision_ms: 2_000,
 };
 
@@ -129,7 +130,7 @@ pub struct Policy {
     in_flight: Option<Profile>,
     last_request: Option<u64>,
     refusals: u8,
-    muted: bool,
+    idle_abandoned: bool,
 }
 
 impl Default for Policy {
@@ -146,7 +147,7 @@ impl Policy {
             in_flight: None,
             last_request: None,
             refusals: 0,
-            muted: false,
+            idle_abandoned: false,
         }
     }
 
@@ -164,21 +165,36 @@ impl Policy {
 
     /// Feed one observation. Post: `Some(profile)` means send that request now,
     /// and the request is recorded as in flight.
+    ///
+    /// Giving up is per-direction. Abandoning Idle must never suppress Active:
+    /// a pad that cannot ask for the fast link back is broken for the rest of
+    /// the connection, whereas a battery optimization that keeps failing only
+    /// costs battery.
     pub fn update(&mut self, now: u64, blank: bool, usb: bool) -> Option<Profile> {
-        if self.muted {
-            return None;
-        }
         // `Option` rather than a 0 sentinel: a request made at t=0 is a real
         // request, and reading it as "never asked" would skip the cooldown.
         let since = self.last_request.map(|at| now.saturating_sub(at));
         if self.in_flight.is_some() {
             match since {
                 Some(elapsed) if elapsed < REQUEST_ACK_MS => return None,
-                _ => self.in_flight = None,
+                _ => {
+                    // No answering `ConnectionParamsUpdated` ever arrived. A
+                    // rejected parameter update is logged inside trouble and
+                    // returned as `Ok`, so this silence is the only signal we
+                    // were refused, and counting it is what stops us asking on
+                    // every cooldown forever.
+                    if self.in_flight == Some(Profile::Idle) {
+                        self.count_failure();
+                    }
+                    self.in_flight = None;
+                }
             }
         }
         let want = Self::target(blank, usb);
         if self.applied == Some(want) {
+            return None;
+        }
+        if want == Profile::Idle && self.idle_abandoned {
             return None;
         }
         if since.is_some_and(|elapsed| elapsed < REQUEST_COOLDOWN_MS) {
@@ -192,30 +208,36 @@ impl Policy {
     /// What the host actually settled on is the only truth about the link. The
     /// applied state follows the observation, never our own request, so a
     /// request the host quietly ignored cannot leave us believing we are asleep.
-    /// Post: asking for Idle and being kept awake counts as a refusal, which is
-    /// what stops an unsatisfiable target being re-requested on every cooldown
-    /// forever.
+    /// Post: asking for Idle and being kept awake counts against it; a granted
+    /// Idle proves the host can do it and clears the ledger.
     pub fn observe(&mut self, observed: Profile) {
         let denied_idle = self.in_flight == Some(Profile::Idle) && observed != Profile::Idle;
         self.applied = Some(observed);
         self.in_flight = None;
         if denied_idle {
-            self.bump_refusal();
+            self.count_failure();
         } else {
             self.refusals = 0;
+            self.idle_abandoned = false;
         }
     }
 
-    /// The host rejected the request outright.
+    /// The host rejected the request outright, for the cases where the stack
+    /// actually propagates it.
     pub fn refused(&mut self) {
+        if self.in_flight == Some(Profile::Idle) {
+            self.count_failure();
+        }
         self.in_flight = None;
-        self.bump_refusal();
     }
 
-    fn bump_refusal(&mut self) {
+    fn count_failure(&mut self) {
+        if self.idle_abandoned {
+            return;
+        }
         self.refusals = self.refusals.saturating_add(1);
         if self.refusals >= MAX_REFUSALS {
-            self.muted = true;
+            self.idle_abandoned = true;
         }
     }
 
@@ -228,8 +250,8 @@ impl Policy {
 
     #[cfg(test)]
     #[must_use]
-    pub const fn is_muted(&self) -> bool {
-        self.muted
+    pub const fn has_given_up_on_idle(&self) -> bool {
+        self.idle_abandoned
     }
 }
 
@@ -410,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn being_kept_awake_when_we_asked_to_sleep_counts_as_a_refusal() {
+    fn being_kept_awake_when_we_asked_to_sleep_counts_against_it() {
         // The dangerous case: the request succeeds, so nothing errors, but the
         // host never lets us sleep. Counting this is what stops the policy
         // asking again on every cooldown for ever.
@@ -427,23 +449,70 @@ mod tests {
             t += REQUEST_COOLDOWN_MS;
         }
         assert!(
-            p.is_muted(),
+            p.has_given_up_on_idle(),
             "a host that never lets us sleep must be given up on"
         );
         assert_eq!(p.update(t, true, false), None);
     }
 
     #[test]
-    fn getting_the_idle_profile_lands_clears_the_refusal_counter() {
+    fn a_silent_idle_request_counts_because_the_error_is_swallowed_upstream() {
+        // trouble logs a rejected parameter update and returns Ok, so the only
+        // sign of refusal is that no `ConnectionParamsUpdated` ever arrives.
+        // Measured against macOS, which rejected the profile 14 times without
+        // our `Err` arm firing once.
         let mut p = Policy::new();
-        p.update(0, false, false);
-        p.refused();
-        p.refused();
+        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        for attempt in 2..=MAX_REFUSALS {
+            let t = u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1);
+            assert_eq!(
+                p.update(t, true, false),
+                Some(Profile::Idle),
+                "still trying at attempt {attempt}"
+            );
+        }
+        let t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
+        assert_eq!(p.update(t, true, false), None, "silence must add up");
+        assert!(p.has_given_up_on_idle());
+    }
+
+    #[test]
+    fn giving_up_on_idle_never_blocks_the_way_back_to_active() {
+        // The reason the mute is per-direction. If abandoning the battery
+        // optimization also silenced Active, a few refusals early in a
+        // connection would strand the pad on a slow link forever.
+        let mut p = Policy::new();
+        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        for attempt in 2..=MAX_REFUSALS {
+            assert_eq!(
+                p.update(u64::from(attempt) * (REQUEST_COOLDOWN_MS + 1), true, false),
+                Some(Profile::Idle)
+            );
+        }
+        let mut t = u64::from(MAX_REFUSALS + 1) * (REQUEST_COOLDOWN_MS + 1);
+        assert_eq!(p.update(t, true, false), None);
+        assert!(p.has_given_up_on_idle());
+        t += REQUEST_COOLDOWN_MS + 1;
+        assert_eq!(p.update(t, false, false), Some(Profile::Active));
+    }
+
+    #[test]
+    fn a_granted_idle_proves_the_host_can_do_it_and_clears_the_ledger() {
+        let mut p = Policy::new();
+        assert_eq!(p.update(0, true, false), Some(Profile::Idle));
+        p.observe(classify(ACTIVE));
+        assert_eq!(
+            p.update(REQUEST_COOLDOWN_MS, true, false),
+            Some(Profile::Idle)
+        );
+        p.observe(classify(ACTIVE));
+        assert_eq!(
+            p.update(2 * REQUEST_COOLDOWN_MS, true, false),
+            Some(Profile::Idle)
+        );
         p.observe(classify(IDLE));
-        assert!(!p.is_muted());
-        p.update(REQUEST_COOLDOWN_MS + 1, false, false);
-        p.refused();
-        assert!(!p.is_muted());
+        assert!(!p.has_given_up_on_idle());
+        assert_eq!(p.applied(), Some(Profile::Idle));
     }
 
     #[test]

@@ -7,6 +7,8 @@
 // and `dis` read as dead even though the generated registration uses them.
 #![allow(dead_code)]
 
+use bt_hci::cmd::le::{LeConnUpdate, LeReadLocalSupportedFeatures};
+use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use defmt::{debug, info, warn};
 use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
@@ -20,6 +22,7 @@ use crate::hid::{CONSUMER_REPORT_LEN, REPORT_LEN, REPORT_MAP, build_reports};
 use crate::host_slots::{self, Action, Controls, Input, Menu, SLOT_KEYS};
 use crate::keypad::{Keypad, SAFETY_POLL_MS};
 use crate::passkey::{self, Entry};
+use crate::power::{self, Profile};
 use crate::recovery;
 
 /// GATT attribute server: HID + Device Information services.
@@ -246,12 +249,16 @@ async fn flash_bonds_cleared(backlight: &mut Backlight<'static>) {
 
 /// Bring up only the selected slot's identity and bond. Switching slots reboots
 /// the radio cleanly rather than retaining another host's security/CCCD state.
-pub async fn run<C: Controller>(
+pub async fn run<C>(
     controller: C,
     keypad: Keypad<'static>,
     backlight: Backlight<'static>,
     mut hosts: HostSlots,
-) {
+) where
+    C: Controller
+        + ControllerCmdAsync<LeConnUpdate>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+{
     let slot = hosts.active;
     let mut resources: HostResources<DefaultPacketPool, 1, 2, 1, 1> = HostResources::new();
     // KeyboardOnly is what buys MITM. Trouble sets the MITM bit in AuthReq for
@@ -284,6 +291,7 @@ pub async fn run<C: Controller>(
         last_activity: 0,
         blanked: false,
         passkey: Entry::new(),
+        power: power::Policy::new(),
     };
     info!(
         "BLE host slot {}: bonded={}",
@@ -293,7 +301,7 @@ pub async fn run<C: Controller>(
     let mut runner = stack.runner();
     select(
         runner.run(),
-        app_loop(stack.peripheral(), &server, &mut hosts, &mut ui),
+        app_loop(stack.peripheral(), &stack, &server, &mut hosts, &mut ui),
     )
     .await;
 }
@@ -330,12 +338,17 @@ fn advertisement(
     n
 }
 
-async fn app_loop<C: Controller>(
+async fn app_loop<C>(
     mut peripheral: Peripheral<'_, C, DefaultPacketPool>,
+    stack: &Stack<'_, C, DefaultPacketPool>,
     server: &Server<'_>,
     hosts: &mut HostSlots,
     ui: &mut KeypadUi,
-) {
+) where
+    C: Controller
+        + ControllerCmdAsync<LeConnUpdate>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+{
     let mut adv_data = [0u8; 31];
     let mut adv_name_buf = [0u8; host_slots::MAX_ADV_NAME_LEN];
     let mut fast_cycles = 0u32;
@@ -420,7 +433,7 @@ async fn app_loop<C: Controller>(
                     warn!("security request failed: {:?}", e);
                 }
                 info!("connected on host slot {}", hosts.active + 1);
-                let action = connection_task(&gatt, &server.hid, hosts, ui).await;
+                let action = connection_task(&gatt, stack, &server.hid, hosts, ui).await;
                 gatt.raw().disconnect();
                 drop(gatt);
                 if let Some(action) = action {
@@ -468,12 +481,18 @@ async fn restart() -> ! {
     }
 }
 
-async fn connection_task(
+async fn connection_task<C>(
     gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    stack: &Stack<'_, C, DefaultPacketPool>,
     hid: &HidService,
     hosts: &mut HostSlots,
     ui: &mut KeypadUi,
-) -> Option<Action> {
+) -> Option<Action>
+where
+    C: Controller
+        + ControllerCmdAsync<LeConnUpdate>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+{
     let report = &hid.report;
     let consumer_report = &hid.consumer_report;
     let mut last_report = None;
@@ -538,6 +557,19 @@ async fn connection_task(
                     warn!("pairing failed: {:?}", err);
                     ui.flash(false).await;
                 }
+                GattConnectionEvent::ConnectionParamsUpdated {
+                    conn_interval,
+                    peripheral_latency,
+                    supervision_timeout,
+                } => note_link(ui, conn_interval, peripheral_latency, supervision_timeout),
+                GattConnectionEvent::RequestConnectionParams(req) => {
+                    // The host's own power schedule beats our guess. Refusing a
+                    // host-initiated update is how you end up with a link the
+                    // host is unhappy with.
+                    if let Err(e) = req.accept(None, stack).await {
+                        warn!("host connection parameter request failed: {:?}", e);
+                    }
+                }
                 GattConnectionEvent::Gatt { event } => {
                     if let Ok(reply) = event.accept() {
                         reply.send().await;
@@ -550,6 +582,7 @@ async fn connection_task(
                     continue;
                 };
                 drive_passkey(gatt, ui).await;
+                drive_link_power(stack, gatt, ui).await;
                 if let Some(action) = input.action {
                     release_reports(gatt, report, consumer_report).await;
                     return Some(action);
@@ -591,6 +624,93 @@ async fn drive_passkey(gatt: &GattConnection<'_, '_, DefaultPacketPool>, ui: &mu
             ui.flash(false).await;
         }
         _ => {}
+    }
+}
+
+const fn profile_label(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Active => "active",
+        Profile::Idle => "idle",
+    }
+}
+
+fn ms(d: Duration) -> u32 {
+    d.as_millis().try_into().unwrap_or(u32::MAX)
+}
+
+/// Fold a link change the host made into the policy. The host's own power
+/// schedule wins over our guess; arguing with it produces a link nobody likes.
+fn note_link(ui: &mut KeypadUi, interval: Duration, latency: u16, timeout: Duration) {
+    info!(
+        "link is {} ms / latency {} / timeout {} ms",
+        ms(interval),
+        latency,
+        ms(timeout)
+    );
+    ui.power
+        .observe(power::classify(observed_params(interval, latency, timeout)));
+}
+
+/// The link the host actually settled on, as a profile-shaped record. min and
+/// max are the same observed value; `classify` only reads the floor.
+fn observed_params(interval: Duration, latency: u16, timeout: Duration) -> power::Params {
+    power::Params {
+        interval_min_ms: ms(interval),
+        interval_max_ms: ms(interval),
+        latency,
+        supervision_ms: ms(timeout),
+    }
+}
+
+/// Translate a profile into the stack's request shape. The bounds were already
+/// checked by `power::Params::is_valid` in tests, so this is a translation and
+/// not a second gate.
+fn link_params(profile: Profile) -> RequestedConnParams {
+    let p = profile.params();
+    RequestedConnParams {
+        min_connection_interval: Duration::from_millis(u64::from(p.interval_min_ms)),
+        max_connection_interval: Duration::from_millis(u64::from(p.interval_max_ms)),
+        max_latency: p.latency,
+        min_event_length: Duration::from_millis(0),
+        max_event_length: Duration::from_millis(0),
+        supervision_timeout: Duration::from_millis(u64::from(p.supervision_ms)),
+    }
+}
+
+/// Ask the host for whatever the policy currently wants. Post: success marks the
+/// profile applied even though the granted numbers may differ, because a
+/// request that lands but is never reported back must not become a request
+/// every cooldown forever; a later `ConnectionParamsUpdated` corrects the model
+/// toward reality.
+async fn drive_link_power<C>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
+    gatt: &GattConnection<'_, '_, DefaultPacketPool>,
+    ui: &mut KeypadUi,
+) where
+    C: Controller
+        + ControllerCmdAsync<LeConnUpdate>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+{
+    let now = Instant::now().as_millis();
+    let Some(profile) = ui
+        .power
+        .update(now, ui.blanked, crate::usb::keyboard_active())
+    else {
+        return;
+    };
+    match gatt
+        .raw()
+        .update_connection_params(stack, &link_params(profile))
+        .await
+    {
+        Ok(()) => {
+            info!("requesting {} link parameters", profile_label(profile));
+            ui.power.confirmed(profile);
+        }
+        Err(e) => {
+            warn!("link parameter request failed: {:?}", e);
+            ui.power.refused();
+        }
     }
 }
 
@@ -675,6 +795,7 @@ struct KeypadUi {
     last_activity: u64,
     blanked: bool,
     passkey: Entry,
+    power: power::Policy,
 }
 
 impl KeypadUi {

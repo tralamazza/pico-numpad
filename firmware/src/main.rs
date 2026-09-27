@@ -29,6 +29,7 @@ mod hid;
 mod host_slots;
 mod keypad;
 mod passkey;
+mod power;
 mod recovery;
 mod routing;
 mod usb;

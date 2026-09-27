@@ -32,7 +32,10 @@ Written in Rust using [Embassy](https://embassy.dev/) and
   MITM pairing cannot pair at all. See
   [`docs/pairing.md`](docs/pairing.md).
 - The backlight turns off after 60 seconds with no input, and comes back on the
-  next keypress.
+  next keypress. The BLE link follows the same signal: when the pad goes idle it
+  asks the host for a longer connection interval to save battery, and asks for
+  the fast one back on the first keypress. The host grants what it likes; on USB
+  no idle request is made, since VBUS is already powering the device.
 - Bluetooth advertising runs at 160 ms for the first 30 cycles after boot or a
   disconnect, then 800 ms.
 - The key matrix is read on the I/O expander's interrupt line rather than polled.

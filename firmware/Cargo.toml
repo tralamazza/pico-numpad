@@ -16,6 +16,9 @@ embedded-storage-async = "0.4"
 cyw43 = { version = "0.7", features = ["defmt", "firmware-logs", "bluetooth"] }
 cyw43-pio = { version = "0.10", features = ["defmt"] }
 trouble-host = { version = "0.8", features = ["default-packet-pool-mtu-128", "defmt", "security", "serde"] }
+# Named only so `update_connection_params`' controller bounds are expressible;
+# trouble already pins 0.10 and Cargo unifies the two.
+bt-hci = "0.10"
 
 serde = { version = "1", default-features = false, features = ["derive"] }
 sequential-storage = { version = "8", default-features = false, features = ["postcard"] }

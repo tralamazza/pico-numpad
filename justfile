@@ -33,6 +33,7 @@ clippy-host:
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/recovery.rs -o /tmp/pico-numpad-recovery-clippy \
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/routing.rs -o /tmp/pico-numpad-routing-clippy \
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/passkey.rs -o /tmp/pico-numpad-passkey-clippy \
+    && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/power.rs -o /tmp/pico-numpad-power-clippy \
     && clippy-driver --edition={{EDITION}} --test {{LINT_FLAGS}} src/config.rs -o /tmp/pico-numpad-config-clippy
 
 # All clippy checks.
@@ -53,6 +54,8 @@ test:
     && /tmp/pico-numpad-routing-tests \
     && rustc --edition={{EDITION}} --test src/passkey.rs -o /tmp/pico-numpad-passkey-tests \
     && /tmp/pico-numpad-passkey-tests \
+    && rustc --edition={{EDITION}} --test src/power.rs -o /tmp/pico-numpad-power-tests \
+    && /tmp/pico-numpad-power-tests \
     && rustc --edition={{EDITION}} --test src/config.rs -o /tmp/pico-numpad-config-tests \
     && /tmp/pico-numpad-config-tests
 

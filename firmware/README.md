@@ -431,15 +431,48 @@ absent by definition -- so the change cannot help in the case that matters. It
 would only avoid work the USB supply is already paying for, while adding a
 resume-on-unplug path that can fail. Not implemented.
 
-### What is actually left
+### Connected-BLE idle power
 
-The connected-BLE idle path. The host grants the connection parameters, so the
-idle wake interval is whatever the host agreed to rather than something this
-firmware picks -- capture the HCI trace to read the interval and slave latency a
-given host actually grants. Requesting a longer interval when nothing is happening
-would stretch that wake rate, at the cost of latency on the first keypress after
-idle. Whether a host grants it is another question; macOS has its own preferences
-about connection parameters.
+The host grants connection parameters, so the firmware cannot dictate its own
+wake rate -- it can only request. `power.rs` holds the policy and `ble.rs` does
+the asking.
+
+Two profiles. **Active** is 15-30 ms, which already carries a numpad burst.
+**Idle** is 100-150 ms, roughly a quarter of the wake rate. Slave latency is
+zero in both: a peripheral skipped for L events still wakes to listen every
+interval, so latency buys little and only adds delay. The interval is the lever.
+
+Idle is entered when the backlight blanks for inactivity, not on a separate
+timer -- the blank already means "nobody is touching this", and a second idle
+clock would be a second thing to keep in sync. On USB the target is always
+Active, for the same reason the previous two sections gave: VBUS is already
+paying, so there is nothing to buy with keystroke latency.
+
+The honest cost is **latency on the first keypress after idle**, bounded by
+whatever interval the host granted. The request to come back to Active rides out
+with that first keystroke, so only the very first key pays it.
+
+Anti-thrash matters more than the numbers, because hosts do what they like:
+
+- 10 s cooldown between requests, so a host that applies something different
+  from what we asked cannot cause oscillation.
+- A request with no observed effect for 5 s is released, so the policy cannot
+  wedge on a request that never landed.
+- After 3 refusals the policy mutes permanently. A host that will not grant it
+  is not going to, and a request every cooldown is worse than no request.
+- `ConnectionParamsUpdated` is folded back in via `classify()`, and host-
+  initiated `RequestConnectionParams` is accepted. If macOS overrules us to
+  45 ms that is adopted, not argued with.
+
+Whether any of it takes effect is host policy, not ours. Read the RTT log: `link
+is N ms / latency L / timeout T ms` after connecting shows what the host
+actually granted, and `requesting idle link parameters` shows whether we asked.
+An idle interval that never changes from the active value means the host
+refused, and after three tries the pad stops asking.
+
+The remaining unknown is what macOS grants on this hardware -- the log line
+above is the measurement to take. The profiles are guesses tuned by reasoning,
+not by a trace.
 
 ## Storage
 

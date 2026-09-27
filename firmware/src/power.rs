@@ -271,7 +271,16 @@ impl Policy {
         if self.ledger(want).abandoned {
             return None;
         }
-        if since.is_some_and(|elapsed| elapsed < REQUEST_COOLDOWN_MS) {
+        // Direction matters here. Going to sleep is a timer-driven decision and
+        // can wait its turn; waking is a human pressing a key. Measured on
+        // hardware, a burst typed 3 s after the pad blanked rode the 600 ms
+        // link for 7 s and got the fast link only after the typist had
+        // stopped, because the idle request owned the cooldown. Round trips
+        // are already spaced by the 60 s blank timer, and refusals are bounded
+        // by the per-direction ledger, so this gate only ever delayed the one
+        // transition that latency actually depends on.
+        let waking = self.applied == Some(Profile::Idle) && want == Profile::Active;
+        if !waking && since.is_some_and(|elapsed| elapsed < REQUEST_COOLDOWN_MS) {
             return None;
         }
         self.in_flight = Some(want);
@@ -541,6 +550,44 @@ mod tests {
             .desired_profile(),
             Profile::Active
         );
+    }
+
+    /// A wake must not queue behind the cooldown that the idle request owns.
+    ///
+    /// Reproduced from hardware: idle requested at t=0, a burst typed ~3 s
+    /// later, and the request for the fast link was held until t=10 s, so the
+    /// entire burst was delivered at 600 ms effective and the fast link
+    /// arrived only after the typist stopped.
+    #[test]
+    fn waking_from_idle_is_not_held_behind_the_sleep_cooldown() {
+        let mut p = Policy::new();
+        assert_eq!(p.update(0, st(true)), Some(Profile::Idle));
+        p.observe(Profile::Idle);
+        assert_eq!(
+            p.update(1_000, st(false)),
+            Some(Profile::Active),
+            "a keypress 1 s after the pad blanked must be able to ask for the fast link"
+        );
+    }
+
+    /// Bypassing the cooldown must not turn a refused wake into a tight loop.
+    #[test]
+    fn a_wake_that_keeps_being_refused_gives_up_on_the_shared_budget() {
+        let mut p = Policy::new();
+        assert_eq!(p.update(0, st(true)), Some(Profile::Idle));
+        p.observe(Profile::Idle);
+        let mut asked = 0;
+        for i in 0..10u64 {
+            if p.update(1 + i * (REQUEST_ACK_MS + 1), st(false)).is_some() {
+                asked += 1;
+            }
+        }
+        assert_eq!(
+            asked,
+            u64::from(MAX_REFUSALS),
+            "wake must stop after the shared refusal budget, not hammer the host"
+        );
+        assert!(p.has_given_up_on_active());
     }
 
     #[test]

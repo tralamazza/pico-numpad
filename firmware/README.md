@@ -437,10 +437,39 @@ The host grants connection parameters, so the firmware cannot dictate its own
 wake rate -- it can only request. `power.rs` holds the policy and `ble.rs` does
 the asking.
 
-Two profiles. **Active** is 15-30 ms, which already carries a numpad burst.
-**Idle** is 100-150 ms, roughly a quarter of the wake rate. Slave latency is
-zero in both: a peripheral skipped for L events still wakes to listen every
-interval, so latency buys little and only adds delay. The interval is the lever.
+What governs power here is not the connection interval but the **effective wake
+period**, `(1 + latency) x interval`: the gap between points at which the
+peripheral is obliged to be awake. A peripheral with something to send answers
+at every event, so the *interval* sets latency while typing. The *latency* sets
+how long it can stay away while it has nothing to send. They are not independent
+knobs -- their product is the single thing being traded, and it is both the idle
+power budget and the worst-case delay on the first keypress after idle.
+
+Measured on macOS at connect: 15 ms / latency 22 = **345 ms** effective. Any
+idle profile whose effective period is below that is a regression, which is how
+the first version of this feature turned out: 150 ms / latency 0 asked for a
+shorter sleep than the host was already taking.
+
+Both profiles sit at the 7.5 ms floor interval, so granularity is retained for
+when the user comes back and latency does all the idle work:
+
+| profile | interval | latency | effective |
+|---|---|---|---|
+| Active | 7.5-10 ms | 0 | <= 10 ms |
+| Idle | 7.5 ms | 79 | 600 ms |
+
+The supervision timeout must exceed `2 x effective`, so 600 ms of skipped
+events needs more than 1.2 s; both profiles use 2 s. Raising the idle latency
+buys battery linearly and costs first-key latency linearly, so it is bounded by
+feel rather than by the stack. Intervals are stored in link-layer units of
+1.25 ms because the 7.5 ms floor is not an integer number of milliseconds --
+storing ms would round the floor to 6.25 ms and get the request rejected.
+
+One consequence worth naming: at a 7.5 ms interval with a high latency the host
+keeps polling at 7.5 ms while we sleep through those polls, so radio duty moves
+to the host instead of disappearing. That is the price of keeping the link
+fine-grained. A longer idle interval would spare the host's radio for the same
+saving on ours.
 
 Idle is entered when the backlight blanks for inactivity, not on a separate
 timer -- the blank already means "nobody is touching this", and a second idle
@@ -448,9 +477,9 @@ clock would be a second thing to keep in sync. On USB the target is always
 Active, for the same reason the previous two sections gave: VBUS is already
 paying, so there is nothing to buy with keystroke latency.
 
-The honest cost is **latency on the first keypress after idle**, bounded by
-whatever interval the host granted. The request to come back to Active rides out
-with that first keystroke, so only the very first key pays it.
+The honest cost is **latency on the first keypress after idle**, bounded by the
+effective period -- not by the interval. The request to come back to Active
+rides out with that first keystroke, so only the very first key pays it.
 
 Anti-thrash matters more than the numbers, because hosts do what they like:
 
@@ -458,21 +487,24 @@ Anti-thrash matters more than the numbers, because hosts do what they like:
   from what we asked cannot cause oscillation.
 - A request with no observed effect for 5 s is released, so the policy cannot
   wedge on a request that never landed.
+- Applied state follows what the host *settled on*, never our own request. An
+  accepted request is not an applied one.
+- Asking to sleep and being kept awake counts as a refusal even though nothing
+  errored. Without this an unsatisfiable idle target would be re-requested on
+  every cooldown forever, because no failure ever arrives.
 - After 3 refusals the policy mutes permanently. A host that will not grant it
   is not going to, and a request every cooldown is worse than no request.
-- `ConnectionParamsUpdated` is folded back in via `classify()`, and host-
-  initiated `RequestConnectionParams` is accepted. If macOS overrules us to
-  45 ms that is adopted, not argued with.
+- `ConnectionParamsUpdated` is folded back in via `classify()`, which reads the
+  effective period and not the raw interval. A short interval paired with a big
+  latency *is* asleep, and a long interval with no latency is *not*; comparing
+  intervals alone gets both of those backwards. Host-initiated
+  `RequestConnectionParams` is accepted -- if macOS overrules us that is
+  adopted, not argued with.
 
-Whether any of it takes effect is host policy, not ours. Read the RTT log: `link
-is N ms / latency L / timeout T ms` after connecting shows what the host
-actually granted, and `requesting idle link parameters` shows whether we asked.
-An idle interval that never changes from the active value means the host
-refused, and after three tries the pad stops asking.
-
-The remaining unknown is what macOS grants on this hardware -- the log line
-above is the measurement to take. The profiles are guesses tuned by reasoning,
-not by a trace.
+What the host actually granted is in the RTT log: `link is N ms / latency L /
+timeout T ms` after connecting, and `requesting idle link parameters (E ms
+effective)` when we ask. The first measurement of this on macOS is in the table
+above; the idle request itself has not yet been re-measured at these numbers.
 
 ## Storage
 

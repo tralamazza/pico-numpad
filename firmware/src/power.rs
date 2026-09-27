@@ -3,35 +3,50 @@
 //! Pre: the caller reports whether the backlight has blanked for idleness and
 //! whether USB is driving the device.
 //! Post: at most one parameter request is outstanding, requests never thrash,
-//! and repeated refusals stop asking instead of hammering the host.
+//! and a host that will not grant the idle profile is detected rather than
+//! asked forever.
+//!
+//! Two numbers matter and they do different jobs. The interval governs latency
+//! while the pad has data, because a peripheral with something to send answers
+//! at every event. The latency governs how deeply it sleeps while it has
+//! nothing, because it may stay away for that many events. What the user feels
+//! and what the battery pays is the product of the two.
 
-/// Connection parameters to request, in milliseconds. Kept as plain integers
-/// rather than the stack's own type so the policy is testable off-target.
+/// Units of 1.25 ms, the link layer's own granularity. Deliberately not
+/// milliseconds: the BLE floor of 7.5 ms is not an integer number of
+/// milliseconds, and storing ms would silently round the floor to 6.25 ms and
+/// get the request rejected.
+pub const UNIT_US: u32 = 1_250;
+
+/// The BLE minimum connection interval, in units.
+pub const MIN_INTERVAL_UNITS: u16 = 6;
+
+/// Connection parameters to request. Kept as plain integers rather than the
+/// stack's own type so the policy is testable off-target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Params {
-    pub interval_min_ms: u32,
-    pub interval_max_ms: u32,
+    pub interval_min_units: u16,
+    pub interval_max_units: u16,
     pub latency: u16,
     pub supervision_ms: u32,
 }
 
-/// Typing profile. 30 ms already carries a numpad burst, so the floor only
-/// matters if the host wants to go faster.
+/// Typing profile: the floor interval, no latency. Every event answered, so a
+/// keystroke waits at most one interval.
 pub const ACTIVE: Params = Params {
-    interval_min_ms: 15,
-    interval_max_ms: 30,
+    interval_min_units: MIN_INTERVAL_UNITS,
+    interval_max_units: 8,
     latency: 0,
     supervision_ms: 2_000,
 };
 
-/// Idle profile. Roughly a quarter of the wake rate, paid for in first-keystroke
-/// latency. Latency is deliberately zero: a slave skipped for L events saves
-/// transmissions but still wakes to listen each interval, so the interval is
-/// the lever and latency would only add delay without buying much.
+/// Idle profile: same floor interval, latency doing all the work. Kept at the
+/// floor so that when the user comes back the link is already fine-grained and
+/// only the first keystroke pays the sleep depth.
 pub const IDLE: Params = Params {
-    interval_min_ms: 100,
-    interval_max_ms: 150,
-    latency: 0,
+    interval_min_units: MIN_INTERVAL_UNITS,
+    interval_max_units: MIN_INTERVAL_UNITS,
+    latency: 79,
     supervision_ms: 2_000,
 };
 
@@ -64,20 +79,46 @@ impl Profile {
 }
 
 impl Params {
+    /// The gap between points at which the peripheral is obliged to be awake.
+    /// This single number is both the idle power budget and the worst-case
+    /// delay on the first keystroke after idle, which is why the interval and
+    /// the latency cannot both be optimised independently.
+    #[must_use]
+    pub const fn effective_ms(&self) -> u32 {
+        self.interval_max_units as u32 * (self.latency as u32 + 1) * 5 / 4
+    }
+
     /// Mirror of the link layer's own validity rules, checked here so a bad
     /// profile fails a host test instead of an HCI command at runtime.
-    /// Post: bounds on interval range and latency, and the supervision timeout
-    /// long enough that a string of missed events is not read as a dropped link.
+    /// Post: bounds on interval range and latency, and a supervision timeout
+    /// long enough that a full run of skipped events is not read as a drop.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_valid(&self) -> bool {
-        self.interval_min_ms <= self.interval_max_ms
-            && self.interval_min_ms >= 7
-            && self.interval_max_ms <= 4_000
+        self.interval_min_units <= self.interval_max_units
+            && self.interval_min_units >= MIN_INTERVAL_UNITS
+            && self.interval_max_units <= 3_200
             && self.latency < 500
             && self.supervision_ms >= 100
             && self.supervision_ms <= 32_000
-            && (self.supervision_ms as u64) * 1_000
-                > 2 * (self.latency as u64 + 1) * (self.interval_max_ms as u64) * 1_000
+            && (self.supervision_ms as u64)
+                > 2 * (self.latency as u64 + 1) * self.interval_max_units as u64 * 5 / 4
+    }
+}
+
+/// Convert a measured interval to units. Dividing microseconds by 1250 is
+/// exact for every legal interval, so no rounding drift creeps in through the
+/// millisecond truncation that `as_millis` would apply.
+/// Post: saturates at `u16::MAX`, so an absurd measurement cannot wrap back
+/// down into a small interval that looks legal.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)] // bounded by the saturation guard
+pub const fn units_from_us(us: u64) -> u16 {
+    let units = us / UNIT_US as u64;
+    if units > u16::MAX as u64 {
+        u16::MAX
+    } else {
+        units as u16
     }
 }
 
@@ -148,46 +189,57 @@ impl Policy {
         Some(want)
     }
 
-    /// The host moved the link. Post: the profile is considered applied even if
-    /// the host picked different numbers, because the intent landed.
-    pub fn confirmed(&mut self, profile: Profile) {
-        self.applied = Some(profile);
+    /// What the host actually settled on is the only truth about the link. The
+    /// applied state follows the observation, never our own request, so a
+    /// request the host quietly ignored cannot leave us believing we are asleep.
+    /// Post: asking for Idle and being kept awake counts as a refusal, which is
+    /// what stops an unsatisfiable target being re-requested on every cooldown
+    /// forever.
+    pub fn observe(&mut self, observed: Profile) {
+        let denied_idle = self.in_flight == Some(Profile::Idle) && observed != Profile::Idle;
+        self.applied = Some(observed);
         self.in_flight = None;
-        self.refusals = 0;
+        if denied_idle {
+            self.bump_refusal();
+        } else {
+            self.refusals = 0;
+        }
     }
 
-    /// The host rejected or ignored the request. Post: after `MAX_REFUSALS` the
-    /// policy mutes itself permanently.
+    /// The host rejected the request outright.
     pub fn refused(&mut self) {
         self.in_flight = None;
+        self.bump_refusal();
+    }
+
+    fn bump_refusal(&mut self) {
         self.refusals = self.refusals.saturating_add(1);
         if self.refusals >= MAX_REFUSALS {
             self.muted = true;
         }
     }
 
-    /// Adopt a profile the host chose on its own, so we do not fight it.
-    pub fn observe(&mut self, profile: Profile) {
-        self.applied = Some(profile);
-    }
-
+    /// The profile the policy last saw applied, test-visible only.
+    #[cfg(test)]
     #[must_use]
     pub const fn applied(&self) -> Option<Profile> {
         self.applied
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn is_muted(&self) -> bool {
         self.muted
     }
 }
 
-/// Classify parameters the host applied into a profile, so a host-driven change
-/// is recognised instead of argued with. Post: `Idle` only when the interval is
-/// clearly a sleeping one; anything tighter counts as Active.
+/// Classify by effective wake period, never by raw interval. A host can pair a
+/// short interval with a large latency and be asleep, or a long interval with
+/// zero latency and be awake; comparing intervals alone gets both of those
+/// backwards, which is precisely the mistake this profile shape makes easy.
 #[must_use]
 pub fn classify(params: Params) -> Profile {
-    if params.interval_min_ms >= IDLE.interval_min_ms {
+    if params.effective_ms() >= IDLE.effective_ms() {
         Profile::Idle
     } else {
         Profile::Active
@@ -205,22 +257,70 @@ mod tests {
     }
 
     #[test]
-    // The constants are the subject here: if someone retunes either profile so
-    // idle stops being a real reduction in wake rate, this is what says so.
-    #[allow(clippy::assertions_on_constants)]
-    fn the_idle_profile_actually_saves_wakes_and_the_active_one_does_not() {
+    fn the_supervision_timeout_covers_a_full_run_of_skipped_events() {
+        // Latency 79 means 80 intervals can pass without contact, and the
+        // effective period already is that stretch. The link layer wants the
+        // timeout above twice it, so a healthy link is not declared dead
+        // during a normal idle run.
+        let window_ms = u64::from(IDLE.effective_ms());
         assert!(
-            IDLE.interval_min_ms >= 3 * ACTIVE.interval_max_ms,
-            "idle must be a real reduction in wake rate, not a token one"
+            u64::from(IDLE.supervision_ms) > 2 * window_ms,
+            "timeout {} ms must exceed {} ms of skipped events",
+            IDLE.supervision_ms,
+            window_ms
         );
     }
 
     #[test]
-    fn an_interval_outside_the_bounds_is_caught_here_not_at_runtime() {
+    fn effective_period_is_the_product_not_the_interval() {
+        assert_eq!(
+            Params {
+                interval_min_units: 6,
+                interval_max_units: 6,
+                latency: 0,
+                supervision_ms: 2_000,
+            }
+            .effective_ms(),
+            7
+        ); // 7.5 ms truncates to 7 in integer ms; the units hold the truth
+        assert_eq!(
+            Params {
+                interval_min_units: 6,
+                interval_max_units: 6,
+                latency: 79,
+                supervision_ms: 2_000,
+            }
+            .effective_ms(),
+            600
+        );
+        assert_eq!(ACTIVE.effective_ms(), 10, "8 units = 10 ms, no latency");
+        assert_eq!(IDLE.effective_ms(), 600);
+    }
+
+    #[test]
+    fn the_idle_profile_is_a_real_reduction_in_wake_rate() {
+        // 600 ms against 10 ms is not a token saving, and against the 345 ms
+        // macOS was measured using at connect it is still better.
+        assert!(IDLE.effective_ms() >= 20 * ACTIVE.effective_ms());
+        assert!(IDLE.effective_ms() >= 345);
+    }
+
+    #[test]
+    fn the_floor_interval_is_expressible_which_is_why_units_exist() {
+        assert_eq!(units_from_us(7_500), 6);
+        assert_eq!(units_from_us(15_000), 12);
+        assert_eq!(units_from_us(11_250), 9);
+        assert_eq!(MIN_INTERVAL_UNITS * 1_250, 7_500);
+        assert_eq!(units_from_us(0), 0);
+        assert_eq!(units_from_us(u64::MAX), u16::MAX, "saturates, never wraps");
+    }
+
+    #[test]
+    fn an_interval_below_the_ble_floor_is_caught_here_not_at_runtime() {
         assert!(
             !Params {
-                interval_min_ms: 5,
-                interval_max_ms: 30,
+                interval_min_units: 5,
+                interval_max_units: 8,
                 latency: 0,
                 supervision_ms: 2_000,
             }
@@ -228,21 +328,25 @@ mod tests {
         );
         assert!(
             !Params {
-                interval_min_ms: 100,
-                interval_max_ms: 9_000,
+                interval_min_units: 6,
+                interval_max_units: 3_201,
                 latency: 0,
                 supervision_ms: 2_000,
             }
             .is_valid()
         );
-        // 2 * (latency+1) * interval must be under the supervision timeout or a
-        // run of missed events drops a healthy link.
+    }
+
+    #[test]
+    fn a_timeout_that_does_not_cover_the_latency_is_rejected() {
+        // 6 units with latency 79 skips 600 ms; a 1000 ms timeout would let a
+        // healthy link be declared dead during a normal idle stretch.
         assert!(
             !Params {
-                interval_min_ms: 1_000,
-                interval_max_ms: 1_000,
-                latency: 4,
-                supervision_ms: 9_000,
+                interval_min_units: 6,
+                interval_max_units: 6,
+                latency: 79,
+                supervision_ms: 1_000,
             }
             .is_valid()
         );
@@ -252,32 +356,28 @@ mod tests {
     fn a_blank_backlight_asks_for_the_idle_profile() {
         let mut p = Policy::new();
         assert_eq!(p.update(0, false, false), Some(Profile::Active));
-        p.confirmed(Profile::Active);
-        let t = super::REQUEST_COOLDOWN_MS + 1;
+        p.observe(Profile::Active);
+        let t = REQUEST_COOLDOWN_MS + 1;
         assert_eq!(p.update(t, true, false), Some(Profile::Idle));
     }
 
     #[test]
     fn usb_never_asks_for_idle_because_vbus_is_already_paying() {
-        let mut p = Policy::new();
         assert_eq!(Policy::target(true, true), Profile::Active);
         assert_eq!(Policy::target(true, false), Profile::Idle);
         assert_eq!(Policy::target(false, true), Profile::Active);
-        // Once Active is in effect, a blanked backlight on USB asks for
-        // nothing: there is no battery to save.
+        let mut p = Policy::new();
         assert_eq!(p.update(0, false, true), Some(Profile::Active));
-        p.confirmed(Profile::Active);
-        let t = super::REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t, true, true), None);
+        p.observe(Profile::Active);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, true, true), None);
     }
 
     #[test]
     fn it_does_not_re_ask_for_a_profile_that_is_already_applied() {
         let mut p = Policy::new();
         assert_eq!(p.update(0, false, false), Some(Profile::Active));
-        p.confirmed(Profile::Active);
-        let t = super::REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t, false, false), None);
+        p.observe(Profile::Active);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS + 1, false, false), None);
     }
 
     #[test]
@@ -285,12 +385,10 @@ mod tests {
         let mut p = Policy::new();
         assert_eq!(p.update(0, false, false), Some(Profile::Active));
         p.refused();
-        // Still inside the cooldown: no second request even though the target
-        // changed.
         assert_eq!(p.update(1_000, true, false), None);
-        assert_eq!(p.update(super::REQUEST_COOLDOWN_MS - 1, true, false), None);
+        assert_eq!(p.update(REQUEST_COOLDOWN_MS - 1, true, false), None);
         assert_eq!(
-            p.update(super::REQUEST_COOLDOWN_MS, true, false),
+            p.update(REQUEST_COOLDOWN_MS, true, false),
             Some(Profile::Idle)
         );
     }
@@ -300,97 +398,105 @@ mod tests {
         let mut p = Policy::new();
         assert_eq!(p.update(0, false, false), Some(Profile::Active));
         assert_eq!(p.update(1, true, false), None);
-        assert_eq!(p.update(super::REQUEST_ACK_MS - 1, true, false), None);
+        assert_eq!(p.update(REQUEST_ACK_MS - 1, true, false), None);
     }
 
     #[test]
     fn a_silent_request_eventually_releases_so_the_policy_cannot_wedge() {
         let mut p = Policy::new();
         assert_eq!(p.update(0, false, false), Some(Profile::Active));
-        // The ack window elapsed with no confirmation, so the next cooldown may
-        // re-request rather than sitting on a request that never landed.
-        let t = super::REQUEST_COOLDOWN_MS.max(super::REQUEST_ACK_MS) + 1;
+        let t = REQUEST_COOLDOWN_MS.max(REQUEST_ACK_MS) + 1;
         assert_eq!(p.update(t, true, false), Some(Profile::Idle));
     }
 
     #[test]
-    fn repeated_refusals_mute_the_policy_instead_of_hammering_the_host() {
+    fn being_kept_awake_when_we_asked_to_sleep_counts_as_a_refusal() {
+        // The dangerous case: the request succeeds, so nothing errors, but the
+        // host never lets us sleep. Counting this is what stops the policy
+        // asking again on every cooldown for ever.
         let mut p = Policy::new();
-        let mut asked = 0;
-        let mut t = 0u64;
-        while t < 100 * super::REQUEST_COOLDOWN_MS {
-            if p.update(t, t.is_multiple_of(2), false).is_some() {
-                asked += 1;
-                p.refused();
-            }
-            t += super::REQUEST_COOLDOWN_MS;
+        let mut t = 0;
+        for attempt in 1..=MAX_REFUSALS {
+            assert_eq!(
+                p.update(t, true, false),
+                Some(Profile::Idle),
+                "still trying at refusal {attempt}"
+            );
+            p.observe(classify(ACTIVE));
+            assert_eq!(p.applied(), Some(Profile::Active));
+            t += REQUEST_COOLDOWN_MS;
         }
-        assert!(p.is_muted(), "policy must give up after repeated refusals");
         assert!(
-            asked <= super::MAX_REFUSALS as usize,
-            "asked {asked} times, must stop at {}",
-            super::MAX_REFUSALS
+            p.is_muted(),
+            "a host that never lets us sleep must be given up on"
         );
-        assert_eq!(p.update(t + super::REQUEST_COOLDOWN_MS, true, false), None);
+        assert_eq!(p.update(t, true, false), None);
     }
 
     #[test]
-    fn a_host_applying_our_request_clears_the_refusal_counter() {
+    fn getting_the_idle_profile_lands_clears_the_refusal_counter() {
         let mut p = Policy::new();
         p.update(0, false, false);
         p.refused();
         p.refused();
-        p.confirmed(Profile::Idle);
+        p.observe(classify(IDLE));
         assert!(!p.is_muted());
-        // One more refusal from a clean slate must not mute on its own.
-        p.update(super::REQUEST_COOLDOWN_MS + 1, false, false);
+        p.update(REQUEST_COOLDOWN_MS + 1, false, false);
         p.refused();
         assert!(!p.is_muted());
     }
 
     #[test]
-    fn a_host_picking_its_own_numbers_is_adopted_not_argued_with() {
-        // macOS overruling us to 45 ms is not a failure to retry; it is close
-        // enough to Active that re-asking would just fight the host forever.
-        let mut p = Policy::new();
-        p.update(0, false, false);
-        p.observe(classify(Params {
-            interval_min_ms: 45,
-            interval_max_ms: 45,
-            latency: 0,
-            supervision_ms: 2_000,
-        }));
-        assert_eq!(p.applied(), Some(Profile::Active));
-        let t = super::REQUEST_COOLDOWN_MS + 1;
-        assert_eq!(p.update(t, false, false), None);
-    }
-
-    #[test]
-    fn classify_separates_sleeping_intervals_from_awake_ones() {
+    fn classify_uses_the_effective_period_not_the_raw_interval() {
         assert_eq!(classify(ACTIVE), Profile::Active);
         assert_eq!(classify(IDLE), Profile::Idle);
-        // Straddling values count as awake, so a host that grants something
-        // tidier than our idle floor is not treated as asleep.
+        // A short interval with a big latency IS asleep. Reading the interval
+        // alone would call this Active and never let the pad sleep.
         assert_eq!(
             classify(Params {
-                interval_min_ms: IDLE.interval_min_ms - 1,
-                ..IDLE
+                interval_min_units: MIN_INTERVAL_UNITS,
+                interval_max_units: MIN_INTERVAL_UNITS,
+                latency: 80,
+                supervision_ms: 2_000,
+            }),
+            Profile::Idle
+        );
+        // A long interval with no latency is NOT asleep. Reading the interval
+        // alone would call this Idle and stop asking for a fast link.
+        assert_eq!(
+            classify(Params {
+                interval_min_units: 400,
+                interval_max_units: 400,
+                latency: 0,
+                supervision_ms: 4_000,
             }),
             Profile::Active
         );
     }
 
     #[test]
+    fn the_measured_macos_connect_profile_reads_as_active_not_idle() {
+        // Observed on hardware: 15 ms / latency 22 / 2000 ms = 345 ms
+        // effective. Below our 600 ms idle floor, so correctly awake.
+        let measured = Params {
+            interval_min_units: units_from_us(15_000),
+            interval_max_units: units_from_us(15_000),
+            latency: 22,
+            supervision_ms: 2_000,
+        };
+        assert_eq!(measured.effective_ms(), 345);
+        assert_eq!(classify(measured), Profile::Active);
+    }
+
+    #[test]
     fn going_active_is_never_delayed_by_the_idle_state() {
-        // The first keypress after idle must go active immediately; a slow first
-        // key is already paid for by the long interval.
         let mut p = Policy::new();
         p.update(0, false, false);
-        p.confirmed(Profile::Active);
-        let t = super::REQUEST_COOLDOWN_MS + 1;
+        p.observe(Profile::Active);
+        let t = REQUEST_COOLDOWN_MS + 1;
         p.update(t, true, false);
-        p.confirmed(Profile::Idle);
-        let t2 = t + super::REQUEST_COOLDOWN_MS + 1;
+        p.observe(Profile::Idle);
+        let t2 = t + REQUEST_COOLDOWN_MS + 1;
         assert_eq!(p.update(t2, false, false), Some(Profile::Active));
     }
 }

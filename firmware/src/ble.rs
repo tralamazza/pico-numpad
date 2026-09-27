@@ -652,11 +652,13 @@ fn note_link(ui: &mut KeypadUi, interval: Duration, latency: u16, timeout: Durat
 }
 
 /// The link the host actually settled on, as a profile-shaped record. min and
-/// max are the same observed value; `classify` only reads the floor.
+/// max are the same observed value; `classify` reads the ceiling, because the
+/// effective wake period is what matters.
 fn observed_params(interval: Duration, latency: u16, timeout: Duration) -> power::Params {
+    let us = interval.as_micros();
     power::Params {
-        interval_min_ms: ms(interval),
-        interval_max_ms: ms(interval),
+        interval_min_units: power::units_from_us(us),
+        interval_max_units: power::units_from_us(us),
         latency,
         supervision_ms: ms(timeout),
     }
@@ -668,8 +670,8 @@ fn observed_params(interval: Duration, latency: u16, timeout: Duration) -> power
 fn link_params(profile: Profile) -> RequestedConnParams {
     let p = profile.params();
     RequestedConnParams {
-        min_connection_interval: Duration::from_millis(u64::from(p.interval_min_ms)),
-        max_connection_interval: Duration::from_millis(u64::from(p.interval_max_ms)),
+        min_connection_interval: Duration::from_micros(u64::from(p.interval_min_units) * 1_250),
+        max_connection_interval: Duration::from_micros(u64::from(p.interval_max_units) * 1_250),
         max_latency: p.latency,
         min_event_length: Duration::from_millis(0),
         max_event_length: Duration::from_millis(0),
@@ -677,11 +679,11 @@ fn link_params(profile: Profile) -> RequestedConnParams {
     }
 }
 
-/// Ask the host for whatever the policy currently wants. Post: success marks the
-/// profile applied even though the granted numbers may differ, because a
-/// request that lands but is never reported back must not become a request
-/// every cooldown forever; a later `ConnectionParamsUpdated` corrects the model
-/// toward reality.
+/// Ask the host for whatever the policy currently wants. Post: nothing is
+/// recorded as applied here. An accepted request is not an applied one, so the
+/// `ConnectionParamsUpdated` that follows is the only thing allowed to move the
+/// policy, and a request the host quietly ignored stays unresolved instead of
+/// leaving us believing we are asleep.
 async fn drive_link_power<C>(
     stack: &Stack<'_, C, DefaultPacketPool>,
     gatt: &GattConnection<'_, '_, DefaultPacketPool>,
@@ -704,8 +706,11 @@ async fn drive_link_power<C>(
         .await
     {
         Ok(()) => {
-            info!("requesting {} link parameters", profile_label(profile));
-            ui.power.confirmed(profile);
+            info!(
+                "requesting {} link parameters ({} ms effective)",
+                profile_label(profile),
+                profile.params().effective_ms()
+            );
         }
         Err(e) => {
             warn!("link parameter request failed: {:?}", e);

@@ -535,13 +535,22 @@ The case that genuinely exercises it is a host that suspends or drops
 enumeration while the pad keeps running.
 
 The honest cost is **latency on the first keypress after idle**, bounded by the
-effective period -- not by the interval. The request to come back to Active
-rides out with that first keystroke, so only the very first key pays it.
+effective period -- not by the interval. Nothing can remove it: the pad cannot
+know it is about to be used. Measured end to end, idle landed at 60.00 s, the
+first keypress came at 168.0618, the request for the fast link was issued
+0.3 ms later in the same pass, and the host granted it 0.73 s after that -- so
+one key is slow and the rest of the burst is fast.
+
+It did not always work that way. Waking used to queue behind the same 10 s
+cooldown the idle request owned, which made every key in a burst slow and
+delivered the fast link roughly 8 s after the typist had stopped. That is why
+the cooldown is directional now.
 
 Anti-thrash matters more than the numbers, because hosts do what they like:
 
-- 10 s cooldown between requests, so a host that applies something different
-  from what we asked cannot cause oscillation.
+- 10 s cooldown on *going* to sleep, so a host that applies something different
+  from what we asked cannot cause oscillation. Waking is exempt from it; overlap
+  there is prevented by the in-flight window instead.
 - A request with no observed effect for 5 s is released, so the policy cannot
   wedge on a request that never landed.
 - **A silent idle request counts as a refusal, because there is no other
